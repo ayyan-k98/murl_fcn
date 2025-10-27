@@ -83,6 +83,9 @@ def train_fcn_stage1(
         print("\n" + curriculum.get_summary())
         print()
 
+    # Track phase transitions for epsilon resets
+    previous_phase_idx = curriculum.get_current_phase(start_episode).start_ep
+
     # Training loop with error handling
     try:
         for episode in range(start_episode, num_episodes):
@@ -91,13 +94,28 @@ def train_fcn_stage1(
             # Get map type from curriculum
             map_type = curriculum.get_map_type(episode)
 
+            # Check for phase transition
+            current_phase = curriculum.get_current_phase(episode)
+            if current_phase.start_ep != previous_phase_idx:
+                # New phase started - reset epsilon to enable exploration
+                phase_duration = current_phase.end_ep - current_phase.start_ep
+                epsilon_start = 0.5  # Start at moderate exploration level
+                agent.set_epsilon(epsilon_start)
+                previous_phase_idx = current_phase.start_ep
+                
+                if verbose:
+                    print(f"\n{'='*80}")
+                    print(f"PHASE TRANSITION → {current_phase.name}")
+                    print(f"Episodes: {current_phase.start_ep}-{current_phase.end_ep} ({phase_duration} episodes)")
+                    print(f"Epsilon reset: {agent.epsilon:.3f} → will decay to {current_phase.epsilon_floor:.3f}")
+                    print(f"{'='*80}\n")
+
             # Get phase-specific epsilon parameters from curriculum
             epsilon_floor = curriculum.get_epsilon_floor(episode)
             epsilon_decay = curriculum.get_epsilon_decay(episode)
 
-            # Enforce epsilon floor (minimum exploration)
-            if agent.epsilon < epsilon_floor:
-                agent.set_epsilon(epsilon_floor)
+            # NOTE: epsilon_floor is enforced AFTER decay, not before
+            # This allows epsilon to decay naturally within each phase
 
             # Create environment
             env = CoverageEnvironment(grid_size=grid_size, map_type=map_type)
@@ -165,13 +183,20 @@ def train_fcn_stage1(
             episode_time = time.time() - episode_start_time
             final_coverage = info.get('coverage_pct', 0.0)
 
-            # Decay epsilon
+            # Decay epsilon FIRST
             agent.decay_epsilon(decay_rate=epsilon_decay)
+            
+            # Then enforce floor (prevents going below minimum exploration)
+            if agent.epsilon < epsilon_floor:
+                agent.epsilon = epsilon_floor
 
-            # Record metrics
-            metrics.add_coverage(final_coverage)
-            metrics.add_reward(episode_reward)
-            metrics.add_episode_length(step + 1)
+            # Record metrics (using add_episode which takes all params)
+            metrics.add_episode(
+                reward=episode_reward,
+                coverage=final_coverage,
+                length=step + 1,
+                epsilon=agent.epsilon
+            )
 
             # Timing breakdown (first few episodes)
             if enable_timing:
@@ -184,7 +209,7 @@ def train_fcn_stage1(
 
             # Print progress
             if verbose and (episode + 1) % config.LOG_INTERVAL == 0:
-                avg_coverage_10 = np.mean(metrics.coverage_history[-10:])
+                avg_coverage_10 = np.mean(metrics.episode_coverages[-10:]) if len(metrics.episode_coverages) >= 10 else np.mean(metrics.episode_coverages) if metrics.episode_coverages else 0.0
                 avg_loss = np.mean(episode_loss) if episode_loss else 0.0
 
                 print(f"Ep {episode + 1:4d}/{num_episodes} | "
@@ -203,15 +228,15 @@ def train_fcn_stage1(
             # Validation
             if (episode + 1) % validate_interval == 0:
                 val_results = validate_fcn(agent, grid_size, verbose=verbose)
-                metrics.add_validation(val_results)
+                metrics.validation_scores[episode + 1] = val_results
 
                 if verbose:
                     print(f"\n{'='*80}")
                     print(f"VALIDATION @ Episode {episode + 1}")
                     print(f"{'='*80}")
                     print(f"  Empty Grid:   {val_results['empty']:.1%}")
-                    print(f"  Obstacles:    {val_results['obstacles']:.1%}")
-                    print(f"  Rooms:        {val_results['rooms']:.1%}")
+                    print(f"  Random Obs:   {val_results['random']:.1%}")
+                    print(f"  Rooms:        {val_results['room']:.1%}")
                     print(f"  Average:      {val_results['avg']:.1%}")
                     print(f"{'='*80}\n")
 
@@ -238,7 +263,7 @@ def train_fcn_stage1(
             print("="*80)
             print(f"Total episodes: {num_episodes}")
             print(f"Final epsilon: {agent.epsilon:.3f}")
-            print(f"Average coverage (last 100): {np.mean(metrics.coverage_history[-100:]):.1%}")
+            print(f"Average coverage (last 100): {np.mean(metrics.episode_coverages[-100:]):.1%}")
             print("="*80)
 
     except KeyboardInterrupt:
@@ -285,7 +310,7 @@ def validate_fcn(
     # Validation with low epsilon (mostly greedy)
     agent.set_epsilon(0.1)
 
-    map_types = ['empty', 'obstacles', 'rooms']
+    map_types = ['empty', 'random', 'room']
     results = {}
 
     for map_type in map_types:
@@ -339,8 +364,14 @@ if __name__ == "__main__":
                        help='Resume from checkpoint path')
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress verbose output')
+    parser.add_argument('--probabilistic', action='store_true',
+                       help='Use probabilistic environment (sigmoid coverage) instead of binary')
 
     args = parser.parse_args()
+
+    # Apply probabilistic environment setting if specified
+    if args.probabilistic:
+        config.USE_PROBABILISTIC_ENV = True
 
     # Train
     agent, metrics = train_fcn_stage1(
@@ -361,8 +392,8 @@ if __name__ == "__main__":
 
     print(f"\nFinal Results:")
     print(f"  Empty Grid:   {final_results['empty']:.1%}")
-    print(f"  Obstacles:    {final_results['obstacles']:.1%}")
-    print(f"  Rooms:        {final_results['rooms']:.1%}")
+    print(f"  Random Obs:   {final_results['random']:.1%}")
+    print(f"  Rooms:        {final_results['room']:.1%}")
     print(f"  Average:      {final_results['avg']:.1%}")
     print("="*80)
 
