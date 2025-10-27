@@ -36,13 +36,14 @@ class CurriculumManager:
         phases = [
             # Phase 1: Foundation - Pure open environments
             # FIXED: Read epsilon decay from config for consistent tuning
+            # Floor 0.05 allows full decay within 500 episodes
             CurriculumPhase(
                 name="Phase1_Foundation_PureOpen",
                 start_ep=0,
                 end_ep=500,
                 map_distribution={"empty": 1.0},
                 expected_coverage=0.70,
-                epsilon_floor=0.50,
+                epsilon_floor=0.05,  # FIXED: Was 0.50 (prevented decay!)
                 epsilon_decay=config.EPSILON_DECAY_PHASE1  # FIXED: Read from config
             ),
 
@@ -53,7 +54,7 @@ class CurriculumManager:
                 end_ep=800,
                 map_distribution={"empty": 0.6, "random": 0.4},
                 expected_coverage=0.70,
-                epsilon_floor=0.40,
+                epsilon_floor=0.05,  # FIXED: Was 0.40
                 epsilon_decay=config.EPSILON_DECAY_PHASE2  # FIXED: Read from config
             ),
 
@@ -64,7 +65,7 @@ class CurriculumManager:
                 end_ep=1100,
                 map_distribution={"random": 0.6, "empty": 0.4},
                 expected_coverage=0.72,
-                epsilon_floor=0.30,
+                epsilon_floor=0.05,  # FIXED: Was 0.30
                 epsilon_decay=config.EPSILON_DECAY_PHASE3  # FIXED: Read from config
             ),
 
@@ -75,7 +76,7 @@ class CurriculumManager:
                 end_ep=1150,
                 map_distribution={"empty": 0.5, "random": 0.5},
                 expected_coverage=0.75,
-                epsilon_floor=0.25,
+                epsilon_floor=0.05,  # FIXED: Was 0.25
                 epsilon_decay=config.EPSILON_DECAY_PHASE4  # FIXED: Read from config
             ),
 
@@ -86,7 +87,7 @@ class CurriculumManager:
                 end_ep=1300,
                 map_distribution={"room": 0.4, "empty": 0.3, "random": 0.3},
                 expected_coverage=0.72,
-                epsilon_floor=0.20,
+                epsilon_floor=0.05,  # FIXED: Was 0.20
                 epsilon_decay=config.EPSILON_DECAY_PHASE5  # FIXED: Read from config
             ),
 
@@ -97,7 +98,7 @@ class CurriculumManager:
                 end_ep=1450,
                 map_distribution={"room": 0.55, "random": 0.25, "empty": 0.20},
                 expected_coverage=0.75,
-                epsilon_floor=0.18,
+                epsilon_floor=0.05,  # FIXED: Was 0.18
                 epsilon_decay=config.EPSILON_DECAY_PHASE6  # FIXED: Read from config
             ),
 
@@ -108,7 +109,7 @@ class CurriculumManager:
                 end_ep=1525,
                 map_distribution={"empty": 0.35, "random": 0.35, "room": 0.30},
                 expected_coverage=0.78,
-                epsilon_floor=0.17,
+                epsilon_floor=0.05,  # FIXED: Was 0.17
                 epsilon_decay=config.EPSILON_DECAY_PHASE7  # FIXED: Read from config
             ),
 
@@ -119,7 +120,7 @@ class CurriculumManager:
                 end_ep=1675,
                 map_distribution={"room": 0.45, "corridor": 0.25, "random": 0.20, "empty": 0.10},
                 expected_coverage=0.73,
-                epsilon_floor=0.16,
+                epsilon_floor=0.05,  # FIXED: Was 0.16
                 epsilon_decay=config.EPSILON_DECAY_PHASE8  # FIXED: Read from config
             ),
 
@@ -130,7 +131,7 @@ class CurriculumManager:
                 end_ep=1825,
                 map_distribution={"room": 0.35, "cave": 0.25, "corridor": 0.20, "random": 0.20},
                 expected_coverage=0.70,
-                epsilon_floor=0.16,
+                epsilon_floor=0.05,  # FIXED: Was 0.16
                 epsilon_decay=config.EPSILON_DECAY_PHASE9  # FIXED: Read from config
             ),
 
@@ -141,7 +142,7 @@ class CurriculumManager:
                 end_ep=1900,
                 map_distribution={"room": 0.40, "corridor": 0.25, "cave": 0.20, "random": 0.15},
                 expected_coverage=0.72,
-                epsilon_floor=0.16,
+                epsilon_floor=0.05,  # FIXED: Was 0.16
                 epsilon_decay=config.EPSILON_DECAY_PHASE10  # FIXED: Read from config
             ),
 
@@ -152,7 +153,7 @@ class CurriculumManager:
                 end_ep=2050,
                 map_distribution={"room": 0.30, "cave": 0.20, "lshape": 0.20, "corridor": 0.15, "random": 0.15},
                 expected_coverage=0.68,
-                epsilon_floor=0.15,
+                epsilon_floor=0.05,  # Keep at 0.05
                 epsilon_decay=config.EPSILON_DECAY_PHASE11  # FIXED: Read from config
             ),
 
@@ -163,7 +164,7 @@ class CurriculumManager:
                 end_ep=2150,
                 map_distribution={"room": 0.25, "cave": 0.20, "lshape": 0.20, "corridor": 0.20, "random": 0.15},
                 expected_coverage=0.70,
-                epsilon_floor=0.15,
+                epsilon_floor=0.05,  # Keep at 0.05
                 epsilon_decay=config.EPSILON_DECAY_PHASE12  # FIXED: Read from config
             ),
 
@@ -174,7 +175,7 @@ class CurriculumManager:
                 end_ep=2250,
                 map_distribution={"room": 0.25, "empty": 0.20, "random": 0.20, "cave": 0.15, "corridor": 0.10, "lshape": 0.10},
                 expected_coverage=0.72,
-                epsilon_floor=0.15,
+                epsilon_floor=0.05,  # Keep at 0.05
                 epsilon_decay=config.EPSILON_DECAY_PHASE13  # FIXED: Read from config
             ),
         ]
