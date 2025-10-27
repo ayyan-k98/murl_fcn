@@ -5,6 +5,7 @@ Semantic-based experience replay for balanced learning.
 """
 
 import random
+import numpy as np
 from collections import deque
 from typing import List, Dict, Tuple, Any
 
@@ -79,21 +80,34 @@ class StratifiedReplayMemory:
 
     def sample(self, batch_size: int) -> List:
         """
-        Sample batch with stratified sampling.
+        OPTIMIZED: Sample batch with stratified sampling using vectorized operations.
         """
-        # Calculate samples from each stratum
-        n_coverage = int(batch_size * self.fractions["coverage"])
-        n_exploration = int(batch_size * self.fractions["exploration"])
-        n_failure = int(batch_size * self.fractions["failure"])
-        n_neutral = batch_size - n_coverage - n_exploration - n_failure
+        # OPTIMIZATION: Vectorized computation of samples per stratum
+        strata = ['coverage', 'exploration', 'failure', 'neutral']
+        buffers = [self.coverage_buffer, self.exploration_buffer,
+                   self.failure_buffer, self.neutral_buffer]
 
-        samples = []
+        # Check if we have enough samples
+        total_samples = sum(len(buf) for buf in buffers)
+        if total_samples < batch_size:
+            # Not enough samples - sample from all available
+            all_samples = sum([list(buf) for buf in buffers], [])
+            if len(all_samples) == 0:
+                return []
+            return random.sample(all_samples, min(batch_size, len(all_samples)))
+
+        # OPTIMIZATION: Vectorized allocation using numpy
+        fractions = np.array([self.fractions[s] for s in strata])
+        per_stratum = (batch_size * fractions).astype(int)
+
+        # Adjust for rounding (ensure we sample exactly batch_size items)
+        per_stratum[-1] = batch_size - per_stratum[:-1].sum()
 
         # Sample from each stratum
-        samples.extend(self._sample_from_buffer(self.coverage_buffer, n_coverage))
-        samples.extend(self._sample_from_buffer(self.exploration_buffer, n_exploration))
-        samples.extend(self._sample_from_buffer(self.failure_buffer, n_failure))
-        samples.extend(self._sample_from_buffer(self.neutral_buffer, n_neutral))
+        samples = []
+        for buffer, n_samples in zip(buffers, per_stratum):
+            if n_samples > 0:
+                samples.extend(self._sample_from_buffer(buffer, n_samples))
 
         # Shuffle to avoid order bias
         random.shuffle(samples)

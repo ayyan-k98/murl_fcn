@@ -22,7 +22,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 from config import config
 from data_structures import RobotState, WorldState
@@ -155,18 +155,23 @@ class FCNAgent:
             grid[2, agent_y, agent_x] = 1.0
 
         # Channel 3: Frontier cells (boundary between visited and unvisited)
-        frontier = np.zeros((H, W), dtype=np.float32)
-        for y in range(H):
-            for x in range(W):
-                if visited[y, x] == 0:  # Unvisited
-                    # Check if any neighbor is visited
-                    for dy, dx in [(-1,0), (1,0), (0,-1), (0,1)]:
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < H and 0 <= nx < W:
-                            if visited[ny, nx] == 1:
-                                frontier[y, x] = 1.0
-                                break
-        grid[3] = frontier
+        # OPTIMIZED: Vectorized frontier detection using np.roll
+        # Shift visited map in 4 directions to find neighbors
+        north = np.roll(visited, -1, axis=0)
+        south = np.roll(visited, 1, axis=0)
+        west = np.roll(visited, -1, axis=1)
+        east = np.roll(visited, 1, axis=1)
+
+        # Fix edges (rolled values from opposite side are invalid)
+        north[-1, :] = 0
+        south[0, :] = 0
+        west[:, -1] = 0
+        east[:, 0] = 0
+
+        # Frontier = unvisited cells with at least one visited neighbor
+        has_visited_neighbor = (north + south + west + east) > 0
+        frontier = (visited == 0) & has_visited_neighbor
+        grid[3] = frontier.astype(np.float32)
 
         # Channel 4: Obstacles
         obstacles = np.zeros((H, W), dtype=np.float32)
@@ -254,6 +259,49 @@ class FCNAgent:
             del grid_device, q_values
 
         return action
+
+    def select_actions_batch(
+        self,
+        grid_tensors: torch.Tensor,
+        epsilon: Optional[float] = None
+    ) -> List[int]:
+        """
+        OPTIMIZED: Select actions for batch of states simultaneously.
+
+        This is much faster than calling select_action_from_tensor in a loop
+        because it performs a single forward pass for all states.
+
+        Args:
+            grid_tensors: [batch, 5, H, W] - Multiple pre-encoded grids
+            epsilon: Override default epsilon
+
+        Returns:
+            actions: List of integer actions [0-8]
+        """
+        if epsilon is None:
+            epsilon = self.epsilon
+
+        batch_size = grid_tensors.size(0)
+        actions = []
+
+        # Epsilon-greedy mask (vectorized)
+        explore_mask = torch.rand(batch_size) < epsilon
+
+        # Greedy actions for all (single vectorized forward pass)
+        with torch.no_grad():
+            grid_device = grid_tensors.to(self.device)
+            q_values = self.policy_net(grid_device)  # [batch, 9]
+            greedy_actions = q_values.argmax(dim=1).cpu().numpy()
+            del grid_device, q_values
+
+        # Apply epsilon-greedy
+        for i in range(batch_size):
+            if explore_mask[i]:
+                actions.append(random.randint(0, config.N_ACTIONS - 1))
+            else:
+                actions.append(int(greedy_actions[i]))
+
+        return actions
 
     def store_transition(
         self,
