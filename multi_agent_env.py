@@ -1,14 +1,20 @@
 """
 Multi-Agent Coverage Environment
 
-Extension of the single-agent coverage system for multi-robot coordination.
+Extension of the single-agent coverage system for multi-robot coordination with QMIX.
 
 Key Features:
 - Multiple agents with independent POMDP observations
-- 4 coordination strategies: Independent, Voronoi, Market, Hierarchical
-- Collision avoidance between agents
-- Shared coverage map with team rewards
+- Full state sharing within communication range (for coordination)
+- Agent-agent collision detection and penalties
+- Joint reward structure (cooperative)
 - CTDE (Centralized Training, Decentralized Execution) support
+
+Reward Function:
+1. Joint Coverage Reward: +10 per new cell covered (shared by all agents)
+2. Collision Penalty: -2.0 for agent-agent collision
+3. Separation Incentive: -0.5 for being adjacent to another agent
+4. Redundancy Penalty: -0.1 per cell covered by multiple agents
 """
 
 import math
@@ -769,6 +775,74 @@ class MultiAgentCoverageEnv:
 
 if __name__ == "__main__":
     print("Testing MultiAgentCoverageEnv...")
+    print("\n" + "="*80)
+    print("MULTI-AGENT REWARD FUNCTION")
+    print("="*80)
+    print("""
+The multi-agent reward function has several components:
+
+1. JOINT COVERAGE REWARD (Primary objective)
+   - Reward: +10.0 per NEW cell covered by ANY agent
+   - Shared by ALL agents (cooperative)
+   - Encourages teamwork and efficient exploration
+   
+   Example: If agent 1 covers 5 new cells and agent 2 covers 3 new cells,
+            ALL agents receive reward = (5 + 3) * 10 = 80
+
+2. COLLISION PENALTY
+   - Penalty: -2.0 for agent-agent collision
+   - Applied ONLY to colliding agents
+   - Encourages collision avoidance
+   
+   Example: Agent 1 and Agent 2 try to move to same cell
+            → Both get -2.0 penalty
+
+3. SEPARATION INCENTIVE (Near-miss penalty)
+   - Penalty: -0.5 for being adjacent to another agent
+   - Encourages agents to spread out
+   - Prevents clustering
+   
+   Example: Agent 1 at (5,5), Agent 2 at (5,6) (adjacent)
+            → Both get -0.5 penalty
+
+4. REDUNDANCY PENALTY (Optional)
+   - Penalty: -0.1 per cell covered by multiple agents
+   - Discourages overlapping coverage
+   - Promotes efficient space partitioning
+   
+   Example: Both agents sense same 10 cells
+            → Each gets -0.1 * 10 = -1.0 penalty
+
+TOTAL REWARD per agent:
+reward_i = joint_coverage_reward 
+           + collision_penalty_i 
+           + separation_penalty_i 
+           + redundancy_penalty_i
+
+REWARD MODES:
+- 'joint': All agents share total coverage (fully cooperative)
+- 'individual': Each agent only rewarded for own coverage
+- 'mixed': 70% individual + 30% joint (balance)
+
+COMMUNICATION (Full State Sharing within comm_range):
+- Agents within comm_range share complete local_map
+- Agents merge coverage_history from neighbors
+- Enables coordinated exploration
+- No bandwidth cost (perfect communication)
+
+WHY THIS REWARD STRUCTURE?
+1. Joint reward → cooperation (agents work together)
+2. Collision penalty → safety (avoid crashes)
+3. Separation incentive → efficiency (don't cluster)
+4. Redundancy penalty → optimal coverage (minimize overlap)
+
+This creates emergent behavior:
+- Agents spread out to maximize coverage
+- Agents avoid each other to prevent collisions
+- Agents communicate to share knowledge
+- Team performance >> individual agents
+""")
+    print("="*80)
 
     # Test independent strategy
     env = MultiAgentCoverageEnv(

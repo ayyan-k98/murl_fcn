@@ -6,6 +6,7 @@ Helper functions for plotting and analysis.
 
 import os
 import pickle
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle
@@ -33,14 +34,14 @@ def plot_training_curves(metrics: CoverageMetrics,
     ax = axes[0, 0]
     ax.plot(metrics.episode_rewards, alpha=0.3, label='Episode')
     if len(metrics.episode_rewards) > 100:
-        window = min(100, len(metrics.episode_rewards) // 10)
+        window = min(50, len(metrics.episode_rewards) // 10)  # Cap at 50 for better responsiveness
         smoothed = np.convolve(metrics.episode_rewards,
                               np.ones(window)/window,
                               mode='valid')
         ax.plot(smoothed, label=f'Smoothed ({window})', linewidth=2)
     ax.set_xlabel('Episode')
     ax.set_ylabel('Reward')
-    ax.set_title('Episode Rewards')
+    ax.set_title('Episode Rewards (3-step returns)')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -49,7 +50,7 @@ def plot_training_curves(metrics: CoverageMetrics,
     coverages_pct = [c * 100 for c in metrics.episode_coverages]
     ax.plot(coverages_pct, alpha=0.3, label='Episode')
     if len(coverages_pct) > 100:
-        window = min(100, len(coverages_pct) // 10)
+        window = min(50, len(coverages_pct) // 10)  # Cap at 50 for better responsiveness
         smoothed = np.convolve(coverages_pct,
                               np.ones(window)/window,
                               mode='valid')
@@ -74,14 +75,14 @@ def plot_training_curves(metrics: CoverageMetrics,
     if len(metrics.dqn_loss) > 0:
         ax.plot(metrics.dqn_loss, alpha=0.3, label='Step')
         if len(metrics.dqn_loss) > 100:
-            window = min(100, len(metrics.dqn_loss) // 10)
+            window = min(200, len(metrics.dqn_loss) // 20)  # Larger window for loss
             smoothed = np.convolve(metrics.dqn_loss,
                                   np.ones(window)/window,
                                   mode='valid')
             ax.plot(smoothed, label=f'Smoothed ({window})', linewidth=2)
         ax.set_xlabel('Optimization Step')
         ax.set_ylabel('Loss')
-        ax.set_title('DQN Loss')
+        ax.set_title('DQN Loss (3-step TD error)')
         ax.legend()
         ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
@@ -99,7 +100,7 @@ def plot_training_curves(metrics: CoverageMetrics,
     if len(metrics.grad_norms) > 0:
         ax.plot(metrics.grad_norms, alpha=0.3, label='Step')
         if len(metrics.grad_norms) > 100:
-            window = min(100, len(metrics.grad_norms) // 10)
+            window = min(200, len(metrics.grad_norms) // 20)  # Larger window for gradients
             smoothed = np.convolve(metrics.grad_norms,
                                   np.ones(window)/window,
                                   mode='valid')
@@ -280,11 +281,29 @@ def visualize_episode(world_state: WorldState,
 
 
 def save_metrics(metrics: CoverageMetrics, path: str):
-    """Save metrics to file."""
+    """Save metrics to file (pickle for backward compatibility)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'wb') as f:
         pickle.dump(metrics, f)
     print(f"✓ Saved metrics: {path}")
+    
+    # Also save as JSON for human readability
+    json_path = path.replace('.pkl', '.json')
+    data = {
+        'episode_rewards': metrics.episode_rewards,
+        'episode_coverages': metrics.episode_coverages,
+        'episode_lengths': metrics.episode_lengths,
+        'dqn_loss': metrics.dqn_loss,
+        'epsilon_values': metrics.epsilon_values,
+        'grad_norms': metrics.grad_norms,
+        'grad_explosions': metrics.grad_explosions,
+        'validation_scores': {
+            int(k): v for k, v in metrics.validation_scores.items()
+        }
+    }
+    with open(json_path, 'w') as f:
+        json.dump(data, f, indent=2)
+    print(f"✓ Saved metrics (JSON): {json_path}")
 
 
 def load_metrics(path: str) -> CoverageMetrics:
@@ -295,13 +314,84 @@ def load_metrics(path: str) -> CoverageMetrics:
     return metrics
 
 
-def print_statistics(metrics: CoverageMetrics, window: int = 100):
+def plot_curriculum_phases(metrics: CoverageMetrics, 
+                          curriculum,
+                          save_path: str = None,
+                          show: bool = True):
+    """
+    Plot training progress with curriculum phase boundaries.
+    
+    Args:
+        metrics: Training metrics
+        curriculum: CurriculumManager instance
+        save_path: Path to save figure
+        show: Whether to display figure
+    """
+    fig, ax = plt.subplots(figsize=(16, 8))
+    
+    episodes = range(len(metrics.episode_coverages))
+    coverages = [c * 100 for c in metrics.episode_coverages]
+    
+    # Plot coverage with smoothing
+    ax.plot(episodes, coverages, alpha=0.3, color='blue', label='Episode Coverage')
+    if len(coverages) > 50:
+        window = min(50, len(coverages) // 10)
+        smoothed = np.convolve(coverages, np.ones(window)/window, mode='valid')
+        ax.plot(range(len(smoothed)), smoothed, color='blue', linewidth=2, label=f'Smoothed ({window})')
+    
+    # Add phase boundaries and targets
+    colors = plt.cm.Set3(np.linspace(0, 1, len(curriculum.phases)))
+    for i, phase in enumerate(curriculum.phases):
+        # Phase boundary
+        ax.axvline(x=phase.start_ep, color='red', linestyle='--', alpha=0.5, linewidth=1)
+        
+        # Phase background
+        ax.axvspan(phase.start_ep, phase.end_ep, alpha=0.1, color=colors[i])
+        
+        # Phase label
+        mid_ep = phase.start_ep + (phase.end_ep - phase.start_ep) // 2
+        ax.text(mid_ep, ax.get_ylim()[1] * 0.98,
+               f'P{i+1}', ha='center', va='top', fontsize=10, weight='bold')
+        
+        # Target coverage line
+        target_y = phase.expected_coverage * 100
+        ax.hlines(target_y, phase.start_ep, phase.end_ep,
+                 colors='green', linestyles=':', alpha=0.6, linewidth=2)
+    
+    # Add validation points
+    if len(metrics.validation_scores) > 0:
+        val_episodes = sorted(metrics.validation_scores.keys())
+        val_coverages = [np.mean(list(metrics.validation_scores[ep].values())) * 100 
+                        for ep in val_episodes]
+        ax.scatter(val_episodes, val_coverages, color='orange', s=100, 
+                  marker='*', label='Validation', zorder=5, edgecolors='black')
+    
+    ax.set_xlabel('Episode', fontsize=12)
+    ax.set_ylabel('Coverage (%)', fontsize=12)
+    ax.set_title('Training Progress with Curriculum Phases', fontsize=14)
+    ax.legend(fontsize=10, loc='lower right')
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 100)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✓ Saved curriculum plot: {save_path}")
+    
+    if show:
+        plt.show()
+
+
+def print_statistics(metrics: CoverageMetrics, window: int = 100, training_time: float = None):
     """
     Print training statistics.
 
     Args:
         metrics: Training metrics
         window: Window size for averaging
+        training_time: Total training time in seconds (optional)
     """
     print("\n" + "=" * 80)
     print("TRAINING STATISTICS")
@@ -310,7 +400,7 @@ def print_statistics(metrics: CoverageMetrics, window: int = 100):
     print(f"Total Episodes: {len(metrics.episode_rewards)}")
 
     if len(metrics.episode_rewards) > 0:
-        print(f"\nRewards:")
+        print(f"\nRewards (3-step returns):")
         print(f"  Mean (last {window}): {metrics.get_recent_avg('reward', window):.2f}")
         print(f"  Max: {max(metrics.episode_rewards):.2f}")
         print(f"  Min: {min(metrics.episode_rewards):.2f}")
@@ -324,6 +414,15 @@ def print_statistics(metrics: CoverageMetrics, window: int = 100):
     if len(metrics.episode_lengths) > 0:
         print(f"\nEpisode Length:")
         print(f"  Mean (last {window}): {metrics.get_recent_avg('length', window):.1f}")
+        total_steps = sum(metrics.episode_lengths)
+        print(f"  Total steps: {total_steps:,}")
+        
+        # Efficiency metric
+        if len(metrics.episode_coverages) > 0:
+            recent_coverage = metrics.get_recent_avg('coverage', window)
+            recent_length = metrics.get_recent_avg('length', window)
+            efficiency = (recent_coverage * config.GRID_SIZE ** 2) / recent_length
+            print(f"  Efficiency (last {window}): {efficiency:.2f} cells/step")
 
     if len(metrics.dqn_loss) > 0:
         print(f"\nDQN Loss:")
@@ -341,6 +440,21 @@ def print_statistics(metrics: CoverageMetrics, window: int = 100):
         for ep, scores in sorted(metrics.validation_scores.items())[-3:]:
             avg = np.mean(list(scores.values()))
             print(f"  Episode {ep}: {avg*100:.1f}% average")
+        
+        # Best validation
+        best_ep = max(metrics.validation_scores.keys(),
+                     key=lambda ep: np.mean(list(metrics.validation_scores[ep].values())))
+        best_cov = np.mean(list(metrics.validation_scores[best_ep].values()))
+        print(f"\n  Best validation: Episode {best_ep} ({best_cov*100:.1f}%)")
+
+    if training_time is not None:
+        print(f"\nPerformance:")
+        print(f"  Total training time: {training_time/3600:.2f} hours")
+        print(f"  Episodes/hour: {len(metrics.episode_rewards)/(training_time/3600):.1f}")
+        if len(metrics.episode_lengths) > 0:
+            total_steps = sum(metrics.episode_lengths)
+            print(f"  Steps/second: {total_steps/training_time:.1f}")
+            print(f"  Seconds/episode: {training_time/len(metrics.episode_rewards):.2f}")
 
     print("=" * 80)
 
@@ -348,7 +462,7 @@ def print_statistics(metrics: CoverageMetrics, window: int = 100):
 if __name__ == "__main__":
     # Test visualization with dummy data
     from environment import CoverageEnvironment
-    from agent import CoverageAgent
+    from fcn_agent import FCNAgent  # Use FCN agent instead
 
     print("Testing visualization utilities...")
 
@@ -357,11 +471,11 @@ if __name__ == "__main__":
     state = env.reset()
 
     # Run a few steps
-    agent = CoverageAgent(grid_size=20)
+    agent = FCNAgent(grid_size=20)
     trajectory = [state.position]
 
     for _ in range(20):
-        action = agent.select_action(state, env.world_state, epsilon=0.5)
+        action = agent.select_action(state, env.world_state)
         next_state, reward, done, info = env.step(action)
         trajectory.append(next_state.position)
         state = next_state
