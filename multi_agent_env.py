@@ -1,0 +1,808 @@
+"""
+Multi-Agent Coverage Environment
+
+Extension of the single-agent coverage system for multi-robot coordination.
+
+Key Features:
+- Multiple agents with independent POMDP observations
+- 4 coordination strategies: Independent, Voronoi, Market, Hierarchical
+- Collision avoidance between agents
+- Shared coverage map with team rewards
+- CTDE (Centralized Training, Decentralized Execution) support
+"""
+
+import math
+import random
+from typing import List, Tuple, Dict, Set, Optional
+from enum import Enum
+from dataclasses import dataclass, field
+import numpy as np
+import networkx as nx
+
+from config import config
+from data_structures import RobotState, WorldState
+from environment import CoverageEnvironment
+
+
+class CoordinationStrategy(Enum):
+    """Multi-agent coordination strategies."""
+    INDEPENDENT = "independent"  # No coordination, purely independent agents
+    VORONOI = "voronoi"  # Voronoi-based spatial partitioning
+    MARKET = "market"  # Market-based task allocation (bid on frontiers)
+    HIERARCHICAL = "hierarchical"  # Leader assigns tasks to followers
+
+
+@dataclass
+class AgentState:
+    """State of a single agent in multi-agent setting."""
+    agent_id: int
+    robot_state: RobotState
+    assigned_region: Optional[Set[Tuple[int, int]]] = None  # For Voronoi/Hierarchical
+    task_assignment: Optional[Tuple[int, int]] = None  # For Market/Hierarchical
+    communication_range: float = 5.0
+
+    def reset_assignment(self):
+        """Reset region and task assignments."""
+        self.assigned_region = None
+        self.task_assignment = None
+
+
+@dataclass
+class MultiAgentState:
+    """Complete multi-agent system state."""
+    agents: List[AgentState]
+    world_state: WorldState
+    coordination: CoordinationStrategy
+    step_count: int = 0
+
+    @property
+    def num_agents(self) -> int:
+        return len(self.agents)
+
+    def get_agent_positions(self) -> List[Tuple[int, int]]:
+        """Get all agent positions."""
+        return [agent.robot_state.position for agent in self.agents]
+
+    def get_nearby_agents(self, agent_id: int) -> List[int]:
+        """Get IDs of agents within communication range."""
+        agent = self.agents[agent_id]
+        pos = agent.robot_state.position
+        comm_range = agent.communication_range
+
+        nearby = []
+        for other in self.agents:
+            if other.agent_id == agent_id:
+                continue
+
+            other_pos = other.robot_state.position
+            distance = math.sqrt(
+                (pos[0] - other_pos[0])**2 + (pos[1] - other_pos[1])**2
+            )
+
+            if distance <= comm_range:
+                nearby.append(other.agent_id)
+
+        return nearby
+
+
+class MultiAgentCoverageEnv:
+    """
+    Multi-agent coverage environment with coordination.
+
+    Supports 2-8 agents with various coordination strategies.
+
+    Key Methods:
+        reset() -> MultiAgentState
+        step(actions: List[int]) -> (next_state, rewards, done, info)
+        get_observations() -> List[observation]
+    """
+
+    def __init__(
+        self,
+        num_agents: int = 4,
+        grid_size: int = 20,
+        sensor_range: float = 3.0,
+        communication_range: float = 5.0,
+        coordination: CoordinationStrategy = CoordinationStrategy.INDEPENDENT,
+        map_type: str = "empty",
+        collision_penalty: float = -5.0,
+        team_reward_weight: float = 0.5
+    ):
+        """
+        Initialize multi-agent environment.
+
+        Args:
+            num_agents: Number of agents [2-8]
+            grid_size: Grid dimension
+            sensor_range: POMDP sensor range
+            communication_range: Agent communication range
+            coordination: Coordination strategy
+            map_type: Map type (empty, random, maze, office, warehouse)
+            collision_penalty: Penalty for agent-agent collision
+            team_reward_weight: Weight for team reward vs individual [0-1]
+        """
+        assert 2 <= num_agents <= 8, "num_agents must be in [2, 8]"
+        assert 0 <= team_reward_weight <= 1.0, "team_reward_weight must be in [0, 1]"
+
+        self.num_agents = num_agents
+        self.grid_size = grid_size
+        self.sensor_range = sensor_range
+        self.communication_range = communication_range
+        self.coordination = coordination
+        self.map_type = map_type
+        self.collision_penalty = collision_penalty
+        self.team_reward_weight = team_reward_weight
+
+        # Create base single-agent environments for reusing logic
+        self.base_env = CoverageEnvironment(
+            grid_size=grid_size,
+            sensor_range=sensor_range,
+            map_type=map_type
+        )
+
+        # Multi-agent state
+        self.state: Optional[MultiAgentState] = None
+
+        # Episode tracking
+        self.max_steps = config.MAX_EPISODE_STEPS
+
+        # Coordination state (strategy-specific)
+        self.voronoi_regions: Optional[Dict[int, Set[Tuple[int, int]]]] = None
+        self.market_bids: Optional[Dict[int, Dict[Tuple[int, int], float]]] = None
+        self.leader_id: Optional[int] = None
+
+    def reset(self, map_type: Optional[str] = None) -> MultiAgentState:
+        """
+        Reset environment for new multi-agent episode.
+
+        Args:
+            map_type: Override default map type
+
+        Returns:
+            Initial multi-agent state
+        """
+        if map_type is not None:
+            self.map_type = map_type
+
+        # Generate shared world (obstacles, graph)
+        graph, obstacles = self.base_env.map_generator.generate(self.map_type)
+
+        # Initialize shared coverage map
+        coverage_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        world_state = WorldState(
+            grid_size=self.grid_size,
+            graph=graph,
+            obstacles=obstacles,
+            coverage_map=coverage_map,
+            map_type=self.map_type
+        )
+
+        # Initialize agents at spatially distributed start positions
+        start_positions = self._generate_start_positions(obstacles)
+
+        agents = []
+        for i in range(self.num_agents):
+            robot_state = RobotState(
+                position=start_positions[i],
+                orientation=random.uniform(0, 2 * math.pi),
+                coverage_history=np.zeros((self.grid_size, self.grid_size), dtype=np.float32),
+                visit_heat=np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+            )
+
+            agent_state = AgentState(
+                agent_id=i,
+                robot_state=robot_state,
+                communication_range=self.communication_range
+            )
+
+            agents.append(agent_state)
+
+        # Create multi-agent state
+        self.state = MultiAgentState(
+            agents=agents,
+            world_state=world_state,
+            coordination=self.coordination,
+            step_count=0
+        )
+
+        # Initialize coordination strategy
+        self._initialize_coordination()
+
+        # Perform initial sensing for all agents
+        for agent in self.state.agents:
+            self._update_agent_sensing(agent)
+
+        return self.state
+
+    def step(
+        self,
+        actions: List[int]
+    ) -> Tuple[MultiAgentState, List[float], bool, Dict]:
+        """
+        Execute multi-agent step.
+
+        Args:
+            actions: List of actions [action_0, action_1, ..., action_n-1]
+
+        Returns:
+            next_state: Updated multi-agent state
+            rewards: List of rewards [reward_0, ..., reward_n-1]
+            done: Episode termination flag
+            info: Additional information dict
+        """
+        assert len(actions) == self.num_agents, f"Expected {self.num_agents} actions"
+
+        self.state.step_count += 1
+
+        # Store previous coverage for reward calculation
+        prev_coverage_map = self.state.world_state.coverage_map.copy()
+        prev_local_map_sizes = [
+            len(agent.robot_state.local_map) for agent in self.state.agents
+        ]
+
+        # Execute actions simultaneously (detect collisions)
+        collision_info = self._execute_actions_parallel(actions)
+
+        # Update coordination strategy
+        self._update_coordination()
+
+        # Update sensing for all agents
+        for agent in self.state.agents:
+            self._update_agent_sensing(agent)
+
+        # Calculate individual rewards
+        individual_rewards = []
+        coverage_gains = []
+        knowledge_gains = []
+
+        for i, agent in enumerate(self.state.agents):
+            coverage_gain = self._calculate_agent_coverage_gain(
+                agent, prev_coverage_map
+            )
+            knowledge_gain = len(agent.robot_state.local_map) - prev_local_map_sizes[i]
+
+            # Individual reward components
+            reward = self._calculate_agent_reward(
+                agent=agent,
+                action=actions[i],
+                coverage_gain=coverage_gain,
+                knowledge_gain=knowledge_gain,
+                collision=collision_info['collisions'][i]
+            )
+
+            individual_rewards.append(reward)
+            coverage_gains.append(coverage_gain)
+            knowledge_gains.append(knowledge_gain)
+
+        # Calculate team reward
+        team_coverage_gain = self._calculate_total_coverage_gain(prev_coverage_map)
+        team_reward = team_coverage_gain * config.COVERAGE_REWARD
+
+        # Blend individual and team rewards
+        final_rewards = [
+            (1 - self.team_reward_weight) * ind_r + self.team_reward_weight * team_reward
+            for ind_r in individual_rewards
+        ]
+
+        # Check termination
+        done = self._check_done()
+
+        # Info dictionary
+        info = {
+            'team_coverage_gain': team_coverage_gain,
+            'individual_coverage_gains': coverage_gains,
+            'knowledge_gains': knowledge_gains,
+            'collisions': collision_info['collisions'],
+            'agent_collisions': collision_info['agent_collisions'],
+            'coverage_pct': self._get_coverage_percentage(),
+            'steps': self.state.step_count,
+            'coordination': self.coordination.value
+        }
+
+        return self.state, final_rewards, done, info
+
+    def _generate_start_positions(
+        self,
+        obstacles: Set[Tuple[int, int]]
+    ) -> List[Tuple[int, int]]:
+        """
+        Generate spatially distributed start positions for agents.
+
+        Uses grid-based placement to ensure agents start spread out.
+        """
+        positions = []
+
+        # Divide grid into regions (rough grid)
+        grid_div = int(math.ceil(math.sqrt(self.num_agents)))
+        region_size = self.grid_size // grid_div
+
+        # Attempt to place one agent per region
+        for i in range(self.num_agents):
+            region_x = (i % grid_div) * region_size
+            region_y = (i // grid_div) * region_size
+
+            # Search for valid position in this region
+            max_attempts = 100
+            for _ in range(max_attempts):
+                x = region_x + random.randint(0, region_size - 1)
+                y = region_y + random.randint(0, region_size - 1)
+
+                # Clamp to grid
+                x = max(1, min(x, self.grid_size - 2))
+                y = max(1, min(y, self.grid_size - 2))
+
+                pos = (x, y)
+
+                # Check valid (not obstacle, not occupied)
+                if pos not in obstacles and pos not in positions:
+                    positions.append(pos)
+                    break
+            else:
+                # Fallback: find any valid position
+                pos = self._find_valid_position(obstacles, positions)
+                positions.append(pos)
+
+        return positions
+
+    def _find_valid_position(
+        self,
+        obstacles: Set[Tuple[int, int]],
+        occupied: List[Tuple[int, int]]
+    ) -> Tuple[int, int]:
+        """Find a valid position (not obstacle, not occupied)."""
+        for _ in range(1000):
+            x = random.randint(1, self.grid_size - 2)
+            y = random.randint(1, self.grid_size - 2)
+            pos = (x, y)
+
+            if pos not in obstacles and pos not in occupied:
+                return pos
+
+        # Last resort: search systematically
+        for x in range(1, self.grid_size - 1):
+            for y in range(1, self.grid_size - 1):
+                pos = (x, y)
+                if pos not in obstacles and pos not in occupied:
+                    return pos
+
+        # Emergency fallback
+        return (self.grid_size // 2, self.grid_size // 2)
+
+    def _execute_actions_parallel(
+        self,
+        actions: List[int]
+    ) -> Dict:
+        """
+        Execute all agent actions simultaneously.
+
+        Detects:
+        - Obstacle collisions
+        - Boundary collisions
+        - Agent-agent collisions
+
+        Returns:
+            collision_info: Dict with 'collisions' and 'agent_collisions'
+        """
+        # Calculate intended positions
+        intended_positions = []
+        for i, agent in enumerate(self.state.agents):
+            action = actions[i]
+            dx, dy = config.ACTION_DELTAS[action]
+
+            current_pos = agent.robot_state.position
+            new_x = current_pos[0] + dx
+            new_y = current_pos[1] + dy
+            intended_pos = (new_x, new_y)
+
+            intended_positions.append(intended_pos)
+
+        # Check collisions
+        collisions = []
+        agent_collisions = []
+
+        for i, agent in enumerate(self.state.agents):
+            action = actions[i]
+            intended_pos = intended_positions[i]
+            current_pos = agent.robot_state.position
+
+            # Update last action
+            agent.robot_state.last_action = action
+
+            collision = False
+            agent_collision = False
+
+            # Check boundary
+            if not (0 <= intended_pos[0] < self.grid_size and
+                    0 <= intended_pos[1] < self.grid_size):
+                collision = True
+
+            # Check obstacle
+            elif intended_pos in self.state.world_state.obstacles:
+                collision = True
+
+            # Check agent-agent collision
+            else:
+                for j, other_intended_pos in enumerate(intended_positions):
+                    if i != j and intended_pos == other_intended_pos:
+                        collision = True
+                        agent_collision = True
+                        break
+
+            # Execute or block movement
+            if not collision:
+                # Valid move
+                agent.robot_state.position = intended_pos
+
+                # Update orientation
+                dx, dy = config.ACTION_DELTAS[action]
+                if dx != 0 or dy != 0:
+                    agent.robot_state.orientation = math.atan2(dy, dx)
+
+                # Mark as visited
+                agent.robot_state.visited_positions.add(intended_pos)
+                agent.robot_state.visit_heat[intended_pos[0], intended_pos[1]] += 1
+
+                # Update coverage map (agent presence covers cell)
+                self.state.world_state.coverage_map[intended_pos[0], intended_pos[1]] = 1.0
+                agent.robot_state.coverage_history[intended_pos[0], intended_pos[1]] = 1.0
+
+            collisions.append(collision)
+            agent_collisions.append(agent_collision)
+
+        return {
+            'collisions': collisions,
+            'agent_collisions': agent_collisions
+        }
+
+    def _update_agent_sensing(self, agent: AgentState):
+        """Update agent's local map via ray-cast sensing."""
+        sensed_cells = self._raycast_sensing(
+            agent.robot_state.position,
+            agent.robot_state.orientation
+        )
+
+        # Update local map
+        for cell in sensed_cells:
+            if cell in self.state.world_state.obstacles:
+                agent.robot_state.local_map[cell] = (0.0, "obstacle")
+            else:
+                coverage = self.state.world_state.coverage_map[cell[0], cell[1]]
+                agent.robot_state.local_map[cell] = (coverage, "free")
+
+    def _raycast_sensing(
+        self,
+        position: Tuple[int, int],
+        orientation: float
+    ) -> Set[Tuple[int, int]]:
+        """Ray-cast sensing (reuse from base environment)."""
+        sensed = set()
+        px, py = position
+
+        sensed.add(position)
+
+        # Vectorized ray-casting
+        angles = np.linspace(0, 2 * np.pi, config.NUM_RAYS, endpoint=False)
+        cos_angles = np.cos(angles)
+        sin_angles = np.sin(angles)
+
+        radii = np.linspace(0, self.sensor_range, config.SAMPLES_PER_RAY)[1:]
+
+        for i in range(config.NUM_RAYS):
+            cos_a = cos_angles[i]
+            sin_a = sin_angles[i]
+
+            for r in radii:
+                cx = int(round(px + r * cos_a))
+                cy = int(round(py + r * sin_a))
+
+                if not (0 <= cx < self.grid_size and 0 <= cy < self.grid_size):
+                    break
+
+                cell = (cx, cy)
+                sensed.add(cell)
+
+                if cell in self.state.world_state.obstacles:
+                    break
+
+        return sensed
+
+    def _calculate_agent_coverage_gain(
+        self,
+        agent: AgentState,
+        prev_coverage_map: np.ndarray
+    ) -> int:
+        """Calculate newly covered cells by this agent."""
+        # This is approximate - in multi-agent, multiple agents may cover same cell
+        # We attribute coverage to all agents who sensed it
+        current_coverage = self.state.world_state.coverage_map
+        newly_covered = np.sum((current_coverage > 0.5) & (prev_coverage_map < 0.5))
+
+        # Divide by number of agents (approximate attribution)
+        return int(newly_covered / self.num_agents)
+
+    def _calculate_total_coverage_gain(self, prev_coverage_map: np.ndarray) -> int:
+        """Calculate total newly covered cells (team metric)."""
+        current_coverage = self.state.world_state.coverage_map
+        newly_covered = np.sum((current_coverage > 0.5) & (prev_coverage_map < 0.5))
+        return int(newly_covered)
+
+    def _calculate_agent_reward(
+        self,
+        agent: AgentState,
+        action: int,
+        coverage_gain: int,
+        knowledge_gain: int,
+        collision: bool
+    ) -> float:
+        """Calculate individual agent reward."""
+        reward = 0.0
+
+        # Coverage reward
+        reward += coverage_gain * config.COVERAGE_REWARD
+
+        # Exploration reward
+        reward += knowledge_gain * config.EXPLORATION_REWARD
+
+        # Collision penalty (stronger for agent-agent collisions)
+        if collision:
+            reward += self.collision_penalty
+
+        # Step penalty
+        reward += config.STEP_PENALTY
+
+        # Stay penalty
+        if action == 8:
+            reward += config.STAY_PENALTY
+
+        return reward
+
+    def _initialize_coordination(self):
+        """Initialize coordination strategy."""
+        if self.coordination == CoordinationStrategy.INDEPENDENT:
+            pass  # No coordination
+
+        elif self.coordination == CoordinationStrategy.VORONOI:
+            self._update_voronoi_regions()
+
+        elif self.coordination == CoordinationStrategy.MARKET:
+            self.market_bids = {i: {} for i in range(self.num_agents)}
+
+        elif self.coordination == CoordinationStrategy.HIERARCHICAL:
+            # Agent 0 is leader
+            self.leader_id = 0
+
+    def _update_coordination(self):
+        """Update coordination strategy (called every step)."""
+        if self.coordination == CoordinationStrategy.VORONOI:
+            # Update Voronoi regions every N steps
+            if self.state.step_count % 10 == 0:
+                self._update_voronoi_regions()
+
+        elif self.coordination == CoordinationStrategy.MARKET:
+            # Market-based task allocation every N steps
+            if self.state.step_count % 20 == 0:
+                self._market_allocation()
+
+        elif self.coordination == CoordinationStrategy.HIERARCHICAL:
+            # Leader assigns tasks every N steps
+            if self.state.step_count % 15 == 0:
+                self._hierarchical_assignment()
+
+    def _update_voronoi_regions(self):
+        """Compute Voronoi regions for spatial partitioning."""
+        agent_positions = self.state.get_agent_positions()
+
+        self.voronoi_regions = {i: set() for i in range(self.num_agents)}
+
+        # For each cell, assign to nearest agent
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                cell = (x, y)
+
+                if cell in self.state.world_state.obstacles:
+                    continue
+
+                # Find nearest agent
+                min_dist = float('inf')
+                nearest_agent = 0
+
+                for i, agent_pos in enumerate(agent_positions):
+                    dist = math.sqrt(
+                        (x - agent_pos[0])**2 + (y - agent_pos[1])**2
+                    )
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_agent = i
+
+                self.voronoi_regions[nearest_agent].add(cell)
+
+        # Update agent assignments
+        for i, agent in enumerate(self.state.agents):
+            agent.assigned_region = self.voronoi_regions[i]
+
+    def _market_allocation(self):
+        """Market-based task allocation (simplified)."""
+        # Identify frontier cells
+        frontier_cells = self._identify_frontier_cells()
+
+        if len(frontier_cells) == 0:
+            return
+
+        # Each agent bids on frontiers (bid = -distance)
+        bids = {i: {} for i in range(self.num_agents)}
+
+        for i, agent in enumerate(self.state.agents):
+            agent_pos = agent.robot_state.position
+
+            for frontier in frontier_cells:
+                distance = math.sqrt(
+                    (frontier[0] - agent_pos[0])**2 +
+                    (frontier[1] - agent_pos[1])**2
+                )
+                bids[i][frontier] = -distance  # Higher bid = closer
+
+        # Allocate frontiers to highest bidders
+        allocated = set()
+        for frontier in frontier_cells:
+            if frontier in allocated:
+                continue
+
+            # Find highest bidder
+            max_bid = -float('inf')
+            winner = 0
+
+            for i in range(self.num_agents):
+                if frontier in bids[i] and bids[i][frontier] > max_bid:
+                    max_bid = bids[i][frontier]
+                    winner = i
+
+            # Assign to winner
+            self.state.agents[winner].task_assignment = frontier
+            allocated.add(frontier)
+
+    def _hierarchical_assignment(self):
+        """Hierarchical task assignment (leader assigns tasks)."""
+        if self.leader_id is None:
+            return
+
+        # Leader identifies frontiers
+        frontier_cells = self._identify_frontier_cells()
+
+        if len(frontier_cells) == 0:
+            return
+
+        # Leader assigns tasks to followers (round-robin)
+        frontier_list = list(frontier_cells)
+
+        for i, agent in enumerate(self.state.agents):
+            if i == self.leader_id:
+                continue  # Skip leader
+
+            # Assign frontier
+            if len(frontier_list) > 0:
+                assigned_frontier = frontier_list[i % len(frontier_list)]
+                agent.task_assignment = assigned_frontier
+
+    def _identify_frontier_cells(self) -> Set[Tuple[int, int]]:
+        """Identify frontier cells (team knowledge)."""
+        # Merge all agent local maps
+        team_knowledge = set()
+        for agent in self.state.agents:
+            team_knowledge.update(agent.robot_state.local_map.keys())
+
+        # Find frontiers (known cells adjacent to unknown)
+        frontiers = set()
+        for cell in team_knowledge:
+            x, y = cell
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                neighbor = (x + dx, y + dy)
+
+                if (0 <= neighbor[0] < self.grid_size and
+                    0 <= neighbor[1] < self.grid_size):
+
+                    if neighbor not in team_knowledge:
+                        frontiers.add(cell)
+                        break
+
+        return frontiers
+
+    def _check_done(self) -> bool:
+        """Check if episode should terminate."""
+        if self.state.step_count >= self.max_steps:
+            return True
+
+        coverage_pct = self._get_coverage_percentage()
+        if coverage_pct > 0.95:
+            return True
+
+        return False
+
+    def _get_coverage_percentage(self) -> float:
+        """Calculate coverage percentage."""
+        total_free_cells = (
+            self.grid_size * self.grid_size -
+            len(self.state.world_state.obstacles)
+        )
+
+        if total_free_cells == 0:
+            return 0.0
+
+        covered_cells = np.sum(self.state.world_state.coverage_map > 0.5)
+        return covered_cells / total_free_cells
+
+    def get_observations(self) -> List[Dict]:
+        """
+        Get POMDP observations for all agents.
+
+        Returns:
+            observations: List of observation dicts (one per agent)
+        """
+        observations = []
+
+        for agent in self.state.agents:
+            obs = {
+                'robot_state': agent.robot_state,
+                'world_state': self.state.world_state,
+                'agent_id': agent.agent_id,
+                'nearby_agents': self.state.get_nearby_agents(agent.agent_id),
+                'assigned_region': agent.assigned_region,
+                'task_assignment': agent.task_assignment
+            }
+            observations.append(obs)
+
+        return observations
+
+    def render(self):
+        """Render environment (text-based)."""
+        coverage_pct = self._get_coverage_percentage()
+
+        print(f"\n=== Multi-Agent Coverage ({self.coordination.value}) ===")
+        print(f"Step {self.state.step_count}/{self.max_steps}")
+        print(f"Coverage: {coverage_pct*100:.1f}%")
+
+        for i, agent in enumerate(self.state.agents):
+            pos = agent.robot_state.position
+            sensed = len(agent.robot_state.local_map)
+            visited = len(agent.robot_state.visited_positions)
+            print(f"  Agent {i}: pos={pos}, sensed={sensed}, visited={visited}")
+
+
+if __name__ == "__main__":
+    print("Testing MultiAgentCoverageEnv...")
+
+    # Test independent strategy
+    env = MultiAgentCoverageEnv(
+        num_agents=4,
+        grid_size=20,
+        coordination=CoordinationStrategy.INDEPENDENT
+    )
+
+    state = env.reset()
+    print(f"\n✓ Reset complete")
+    print(f"  Num agents: {state.num_agents}")
+    print(f"  Agent positions: {state.get_agent_positions()}")
+    print(f"  Coordination: {state.coordination.value}")
+
+    # Test episode
+    total_rewards = [0.0] * env.num_agents
+    for step in range(10):
+        actions = [random.randint(0, 8) for _ in range(env.num_agents)]
+        next_state, rewards, done, info = env.step(actions)
+
+        for i in range(env.num_agents):
+            total_rewards[i] += rewards[i]
+
+        if step == 0:
+            print(f"\n✓ First step complete")
+            print(f"  Actions: {actions}")
+            print(f"  Rewards: {[f'{r:.2f}' for r in rewards]}")
+            print(f"  Team coverage gain: {info['team_coverage_gain']}")
+            print(f"  Agent collisions: {info['agent_collisions']}")
+
+        if done:
+            print(f"\n✓ Episode terminated at step {step}")
+            break
+
+    print(f"\n✓ MultiAgentCoverageEnv test complete")
+    print(f"  Total rewards: {[f'{r:.2f}' for r in total_rewards]}")
+    print(f"  Final coverage: {env._get_coverage_percentage()*100:.1f}%")
