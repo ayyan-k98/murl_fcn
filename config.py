@@ -121,8 +121,8 @@ class Config:
     # TRAIN_FREQ: int = 1 (defined above in Learning section)
     
     # Reduce validation overhead
-    FAST_VALIDATION: bool = True  # Use fewer steps for validation episodes
-    VALIDATION_MAX_STEPS: int = 150  # REDUCED from 200 - Limit validation episode length (vs 200 for training)
+    FAST_VALIDATION: bool = False  # Use fewer steps for validation episodes (disabled for accurate results)
+    VALIDATION_MAX_STEPS: int = 150  # REDUCED from 200 - Limit validation episode length (vs 350 for training)
     
     # GPU optimizations
     USE_AMP: bool = False  # Automatic Mixed Precision (float16) - can cause instability in RL
