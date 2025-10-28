@@ -99,6 +99,29 @@ class Config:
     # Probabilistic environment scaling
     PROBABILISTIC_REWARD_SCALE: float = 0.15  # Keep proven value
 
+    # ==================== Multi-Agent Reward Normalization ====================
+    # CRITICAL: Normalize rewards for QMIX to prevent gradient explosion
+    # Literature: QMIX paper (Rashid et al., 2018), R2D2 (Pohlen et al., 2018)
+    
+    # Per-agent normalization: Divide by number of agents
+    # Single-agent: 5,250/episode → Multi-agent (4): 21,000/episode
+    # After normalization: 5,250/episode (same scale as single-agent)
+    MULTI_AGENT_REWARD_NORMALIZE_BY_N: bool = True
+    
+    # Scale factor: Map rewards to manageable range
+    # Typical per-step reward: 0-20 → After scaling: 0-2
+    # This keeps Q-values in range [0, ~50] instead of [0, 60,000]
+    MULTI_AGENT_REWARD_SCALE_FACTOR: float = 10.0
+    
+    # Optional clipping (disabled by default - scaling is sufficient)
+    MULTI_AGENT_REWARD_CLIP_MIN: float = None  # Set to -1.0 for hard clipping
+    MULTI_AGENT_REWARD_CLIP_MAX: float = None  # Set to +1.0 for hard clipping
+    
+    # Value rescaling (R2D2 style - for advanced use)
+    # h(x) = sign(x)(√(|x|+1) - 1) + εx
+    MULTI_AGENT_USE_VALUE_RESCALING: bool = False
+    MULTI_AGENT_VALUE_RESCALE_EPS: float = 0.001
+
     # ==================== Gradient Stability ====================
     GRAD_CLIP_THRESHOLD: float = 1.0   # Keep tight (working well)
     AGC_CLIP_RATIO: float = 0.01       # Keep strong AGC (working well)

@@ -26,6 +26,8 @@ from multi_agent_env import MultiAgentCoverageEnv, CoordinationStrategy
 from multi_agent_trainer import MultiAgentTrainer
 from multi_agent_config import ma_config
 from config import config
+from communication import get_communication_protocol
+from agent_occupancy import AgentOccupancyComputer
 
 
 def create_directories():
@@ -105,6 +107,8 @@ def train_multi_agent(
     parameter_sharing: bool = True,
     shared_replay: bool = True,
     use_curriculum: bool = True,
+    use_6ch: bool = False,
+    comm_protocol: str = 'none',
     experiment_name: Optional[str] = None
 ):
     """
@@ -117,18 +121,24 @@ def train_multi_agent(
         parameter_sharing: Use parameter sharing
         shared_replay: Use shared replay memory
         use_curriculum: Use curriculum learning
+        use_6ch: Use 6-channel input (adds agent occupancy channel)
+        comm_protocol: Communication protocol ('none', 'full_state', 'attention')
         experiment_name: Experiment name (auto-generated if None)
     """
     # Create experiment name
     if experiment_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        experiment_name = f"ma{num_agents}_{coordination.value}_{timestamp}"
+        ch_suffix = "6ch" if use_6ch else "5ch"
+        comm_suffix = f"_{comm_protocol}" if comm_protocol != 'none' else ""
+        experiment_name = f"ma{num_agents}_{coordination.value}_{ch_suffix}{comm_suffix}_{timestamp}"
 
     print(f"\n{'='*70}")
     print(f"MULTI-AGENT COVERAGE TRAINING")
     print(f"{'='*70}")
     print(f"Experiment: {experiment_name}")
     print(f"Agents: {num_agents}")
+    print(f"Input Channels: {6 if use_6ch else 5} ({'with agent occupancy' if use_6ch else 'baseline'})")
+    print(f"Communication: {comm_protocol}")
     print(f"Coordination: {coordination.value}")
     print(f"Parameter Sharing: {parameter_sharing}")
     print(f"Shared Replay: {shared_replay}")
@@ -156,8 +166,29 @@ def train_multi_agent(
         grid_size=ma_config.GRID_SIZE,
         coordination=coordination,
         parameter_sharing=parameter_sharing,
-        shared_replay=shared_replay
+        shared_replay=shared_replay,
+        input_channels=6 if use_6ch else 5
     )
+
+    # Initialize communication protocol
+    comm_manager = get_communication_protocol(
+        protocol_name=comm_protocol,
+        num_agents=num_agents,
+        grid_size=ma_config.GRID_SIZE,
+        comm_range=ma_config.COMMUNICATION_RANGE
+    )
+    print(f"✓ Communication protocol: {comm_protocol}")
+
+    # Initialize agent occupancy computer (if using 6 channels)
+    occupancy_computer = None
+    if use_6ch:
+        occupancy_computer = AgentOccupancyComputer(
+            grid_size=ma_config.GRID_SIZE,
+            base_sigma=0.5,
+            max_velocity=1.0,
+            time_decay_rate=0.1
+        )
+        print(f"✓ Agent occupancy computation enabled")
 
     print(f"✓ Environment and trainer initialized\n")
 
@@ -210,7 +241,12 @@ def train_multi_agent(
             trainer.decay_epsilon(decay_rate=0.995)
 
         # Train episode
-        episode_info = trainer.train_episode(env, map_type=map_type)
+        episode_info = trainer.train_episode(
+            env, 
+            map_type=map_type,
+            comm_manager=comm_manager,
+            occupancy_computer=occupancy_computer
+        )
 
         # Log progress
         if episode % ma_config.LOG_FREQ == 0:
@@ -337,6 +373,20 @@ def main():
     )
 
     parser.add_argument(
+        '--use-6ch',
+        action='store_true',
+        help='Use 6-channel input with agent occupancy (enables proactive coordination)'
+    )
+
+    parser.add_argument(
+        '--comm-protocol',
+        type=str,
+        default='none',
+        choices=['none', 'full_state', 'attention', 'commnet', 'targeted'],
+        help='Communication protocol (default: none)'
+    )
+
+    parser.add_argument(
         '--experiment-name',
         type=str,
         default=None,
@@ -362,6 +412,8 @@ def main():
         parameter_sharing=not args.no_parameter_sharing,
         shared_replay=not args.no_shared_replay,
         use_curriculum=not args.no_curriculum,
+        use_6ch=args.use_6ch,
+        comm_protocol=args.comm_protocol,
         experiment_name=args.experiment_name
     )
 

@@ -29,7 +29,8 @@ def train_fcn_stage1(
     validate_interval: int = 50,
     checkpoint_interval: int = 100,
     resume_from: Optional[str] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    use_6ch: bool = False
 ) -> tuple:
     """
     Train Stage 1 using FCN + Spatial Softmax architecture.
@@ -41,6 +42,7 @@ def train_fcn_stage1(
         checkpoint_interval: Save checkpoint every N episodes
         resume_from: Path to checkpoint to resume from
         verbose: Print training progress
+        use_6ch: Use 6 channels (dummy zeros for ch5) instead of 5
 
     Returns:
         agent: Trained FCN agent
@@ -54,6 +56,7 @@ def train_fcn_stage1(
         print(f"Grid size: {grid_size}")
         print(f"Device: {config.DEVICE}")
         print(f"Architecture: FCN + Spatial Softmax (grid-invariant)")
+        print(f"Input channels: {6 if use_6ch else 5} ({'6ch with dummy' if use_6ch else '5ch baseline'})")
         if config.USE_PROBABILISTIC_ENV:
             print(f"Environment: PROBABILISTIC (sigmoid coverage)")
         else:
@@ -61,7 +64,7 @@ def train_fcn_stage1(
         print("=" * 80)
 
     # Initialize components
-    agent = FCNAgent(grid_size=grid_size)
+    agent = FCNAgent(grid_size=grid_size, input_channels=6 if use_6ch else 5)
     curriculum = CurriculumManager()
     metrics = CoverageMetrics()
 
@@ -132,11 +135,16 @@ def train_fcn_stage1(
             time_env = 0 if enable_timing else None
             time_train = 0 if enable_timing else None
 
+            # Prepare dummy occupancy channel if using 6 channels
+            dummy_occupancy = None
+            if use_6ch:
+                dummy_occupancy = np.zeros((grid_size, grid_size), dtype=np.float32)
+
             for step in range(config.MAX_EPISODE_STEPS):
                 # Encode state to grid (ONCE per step)
                 if enable_timing:
                     t0 = time.time()
-                grid_tensor = agent._encode_state(state, env.world_state)
+                grid_tensor = agent._encode_state(state, env.world_state, dummy_occupancy)
                 if enable_timing:
                     time_encoding += time.time() - t0
 
@@ -154,7 +162,7 @@ def train_fcn_stage1(
                 episode_reward += reward
 
                 # Encode next state
-                next_grid_tensor = agent._encode_state(next_state, env.world_state)
+                next_grid_tensor = agent._encode_state(next_state, env.world_state, dummy_occupancy)
                 if enable_timing:
                     time_env += time.time() - t0
 
@@ -366,6 +374,8 @@ if __name__ == "__main__":
                        help='Suppress verbose output')
     parser.add_argument('--probabilistic', action='store_true',
                        help='Use probabilistic environment (sigmoid coverage) instead of binary')
+    parser.add_argument('--use-6ch', action='store_true',
+                       help='Use 6 channels (dummy zeros for ch5) for baseline comparison')
 
     args = parser.parse_args()
 
@@ -380,7 +390,8 @@ if __name__ == "__main__":
         validate_interval=args.validate_interval,
         checkpoint_interval=args.checkpoint_interval,
         resume_from=args.resume,
-        verbose=not args.quiet
+        verbose=not args.quiet,
+        use_6ch=args.use_6ch
     )
 
     # Final validation

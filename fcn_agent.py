@@ -47,9 +47,11 @@ class FCNAgent:
         grid_size: int = 20,
         learning_rate: float = None,
         gamma: float = None,
-        device: str = None
+        device: str = None,
+        input_channels: int = 5
     ):
         self.grid_size = grid_size
+        self.input_channels = input_channels
 
         # Use config values if not provided
         if learning_rate is None:
@@ -60,11 +62,11 @@ class FCNAgent:
         self.gamma = gamma
         self.device = device or config.DEVICE
 
-        print(f"✓ Using FCN + Spatial Softmax (grid-size invariant)")
+        print(f"✓ Using FCN + Spatial Softmax (grid-size invariant, {input_channels} channels)")
 
         # Policy network (online)
         self.policy_net = FCNSpatialNetwork(
-            input_channels=5,  # visited, coverage, agent, frontier, obstacles
+            input_channels=input_channels,  # 5 or 6 channels
             num_actions=config.N_ACTIONS,
             hidden_dim=config.CNN_HIDDEN_DIM,  # Use CNN config
             use_coordconv=True,
@@ -74,7 +76,7 @@ class FCNAgent:
 
         # Target network (for stability)
         self.target_net = FCNSpatialNetwork(
-            input_channels=5,
+            input_channels=input_channels,
             num_actions=config.N_ACTIONS,
             hidden_dim=config.CNN_HIDDEN_DIM,
             use_coordconv=True,
@@ -112,7 +114,8 @@ class FCNAgent:
     def _encode_state(
         self,
         robot_state: RobotState,
-        world_state: WorldState
+        world_state: WorldState,
+        agent_occupancy: Optional[np.ndarray] = None
     ) -> torch.Tensor:
         """
         Encode robot and world state as grid tensor.
@@ -122,18 +125,24 @@ class FCNAgent:
         Channel 2: Agent position (one-hot)
         Channel 3: Frontier (binary)
         Channel 4: Obstacles (binary)
+        Channel 5: Agent occupancy (optional, multi-agent only)
 
         Args:
             robot_state: Robot position and history
             world_state: World grid and coverage
+            agent_occupancy: Optional [H, W] array of other agent probabilities
+                           If provided, adds 6th channel. If None, uses 5 channels.
 
         Returns:
-            grid_tensor: [1, 5, H, W] - Batch size 1
+            grid_tensor: [1, 5 or 6, H, W] - Batch size 1
         """
         H, W = world_state.grid_size, world_state.grid_size
 
+        # Determine number of channels based on agent_occupancy
+        n_channels = 6 if agent_occupancy is not None else 5
+
         # Initialize channels
-        grid = np.zeros((5, H, W), dtype=np.float32)
+        grid = np.zeros((n_channels, H, W), dtype=np.float32)
 
         # Channel 0: Visited cells
         visited = np.zeros((H, W), dtype=np.float32)
@@ -180,8 +189,15 @@ class FCNAgent:
                 obstacles[y, x] = 1.0
         grid[4] = obstacles
 
+        # Channel 5: Agent occupancy (optional, multi-agent only)
+        if agent_occupancy is not None:
+            # Validate shape
+            if agent_occupancy.shape != (H, W):
+                raise ValueError(f"agent_occupancy shape {agent_occupancy.shape} != grid shape ({H}, {W})")
+            grid[5] = agent_occupancy.astype(np.float32)
+
         # Convert to tensor and add batch dimension
-        grid_tensor = torch.from_numpy(grid).unsqueeze(0)  # [1, 5, H, W]
+        grid_tensor = torch.from_numpy(grid).unsqueeze(0)  # [1, 5 or 6, H, W]
 
         return grid_tensor
 
@@ -189,7 +205,8 @@ class FCNAgent:
         self,
         robot_state: RobotState,
         world_state: WorldState,
-        epsilon: Optional[float] = None
+        epsilon: Optional[float] = None,
+        agent_occupancy: Optional[np.ndarray] = None
     ) -> int:
         """
         Select action using epsilon-greedy policy.
@@ -198,6 +215,7 @@ class FCNAgent:
             robot_state: Current robot state
             world_state: World state (grid)
             epsilon: Override default epsilon
+            agent_occupancy: Optional [H, W] array for 6th channel (multi-agent)
 
         Returns:
             action: Integer action [0-8]
@@ -211,8 +229,8 @@ class FCNAgent:
 
         # Greedy action
         with torch.no_grad():
-            # Encode state to grid
-            grid = self._encode_state(robot_state, world_state)
+            # Encode state to grid (with optional 6th channel)
+            grid = self._encode_state(robot_state, world_state, agent_occupancy)
             grid = grid.to(self.device)
 
             # Forward pass
