@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import random
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from collections import deque
 
 from fcn_spatial_network import FCNSpatialNetwork
@@ -163,15 +163,33 @@ class QMIXAgent:
     Implements QMIX with FCN-based individual Q-networks.
     """
     
-    def __init__(self, num_agents: int, grid_size: int = 20):
+    def __init__(self, 
+                 num_agents: int, 
+                 grid_size: int = 20, 
+                 input_channels: int = 5,
+                 learning_rate: float = None,
+                 gamma: float = None,
+                 device: str = None):
         self.num_agents = num_agents
         self.grid_size = grid_size
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.input_channels = input_channels
+        
+        # Use config values if not provided
+        if learning_rate is None:
+            learning_rate = config.LEARNING_RATE
+        if gamma is None:
+            gamma = config.GAMMA
+        if device is None:
+            device = config.DEVICE
+        
+        self.learning_rate = learning_rate
+        self.gamma = gamma
+        self.device = torch.device(device if isinstance(device, str) else 'cuda' if torch.cuda.is_available() else 'cpu')
         
         # Individual Q-networks (one per agent, same architecture as FCNAgent)
         self.agent_qnets = nn.ModuleList([
             FCNSpatialNetwork(
-                input_channels=5,  # visited, coverage, position, frontier, obstacles
+                input_channels=input_channels,  # 5 or 6 (with agent occupancy)
                 num_actions=config.N_ACTIONS,
                 hidden_dim=128
             )
@@ -188,7 +206,7 @@ class QMIXAgent:
         # Target networks (for stable learning)
         self.target_qnets = nn.ModuleList([
             FCNSpatialNetwork(
-                input_channels=5,
+                input_channels=input_channels,
                 num_actions=config.N_ACTIONS,
                 hidden_dim=128
             )
@@ -208,7 +226,7 @@ class QMIXAgent:
         # Optimizer (optimizes all agent Q-networks + mixer jointly)
         self.optimizer = optim.Adam(
             list(self.agent_qnets.parameters()) + list(self.mixer.parameters()),
-            lr=config.LEARNING_RATE
+            lr=learning_rate
         )
         
         # Exploration
@@ -218,69 +236,89 @@ class QMIXAgent:
         self.training_steps = 0
     
     def select_actions(self, 
-                      local_obs: List[torch.Tensor],
-                      valid_actions: List[List[int]] = None) -> List[int]:
+                      observations: List[Dict],
+                      epsilon: Optional[float] = None,
+                      agent_occupancies: Optional[List] = None) -> List[int]:
         """
         Select actions for all agents (decentralized execution).
         
-        Each agent uses only its own local observation.
+        Each agent uses only its own local observation and optional occupancy.
         
         Args:
-            local_obs: List of [C, H, W] tensors (one per agent)
-            valid_actions: List of valid action lists (optional, for safety)
+            observations: List of observation dicts from environment
+            epsilon: Override epsilon (default: use self.epsilon)
+            agent_occupancies: Optional list of occupancy maps (one per agent)
         
         Returns:
             actions: List of selected actions
         """
+        if epsilon is None:
+            epsilon = self.epsilon
+        
+        if agent_occupancies is None:
+            agent_occupancies = [None] * len(observations)
+        
+        # Convert observations to tensors (with optional occupancy)
+        local_obs = self._observations_to_tensors(observations, agent_occupancies)
+        
         actions = []
         
         for i, qnet in enumerate(self.agent_qnets):
             # Epsilon-greedy
-            if random.random() < self.epsilon:
+            if random.random() < epsilon:
                 # Random action
-                if valid_actions and valid_actions[i]:
-                    action = random.choice(valid_actions[i])
-                else:
-                    action = random.randint(0, config.N_ACTIONS - 1)
+                action = random.randint(0, config.N_ACTIONS - 1)
             else:
                 # Greedy action
                 with torch.no_grad():
                     obs = local_obs[i].unsqueeze(0).to(self.device)
                     q_values = qnet(obs).squeeze(0)  # [n_actions]
-                    
-                    # Filter by valid actions
-                    if valid_actions and valid_actions[i]:
-                        mask = torch.full_like(q_values, -float('inf'))
-                        mask[valid_actions[i]] = 0
-                        q_values = q_values + mask
-                    
                     action = q_values.argmax().item()
             
             actions.append(action)
         
         return actions
     
-    def _observations_to_tensors(self, observations: List[Dict]) -> List[torch.Tensor]:
+    def _observations_to_tensors(self, 
+                                observations: List[Dict],
+                                agent_occupancies: Optional[List] = None) -> List[torch.Tensor]:
         """
         Convert observation dicts to tensor format for Q-networks.
         
         Args:
             observations: List of observation dicts from environment
+            agent_occupancies: Optional list of occupancy maps (one per agent)
             
         Returns:
-            List of [C, H, W] tensors
+            List of [C, H, W] tensors (C=5 or 6 depending on occupancy)
         """
+        if agent_occupancies is None:
+            agent_occupancies = [None] * len(observations)
+        
+        # Initialize encoder on first call (lazy initialization)
+        if not hasattr(self, '_temp_encoder'):
+            from fcn_agent import FCNAgent
+            self._temp_encoder = FCNAgent(
+                grid_size=self.grid_size,
+                input_channels=self.input_channels,
+                device=self.device
+            )
+        
         tensors = []
-        for obs in observations:
+        for i, obs in enumerate(observations):
             robot_state = obs['robot_state']
             world_state = obs['world_state']
+            occupancy = agent_occupancies[i]
             
-            # Encode as done in FCNAgent
-            # Robot state: position (2), direction (1), sensor_range (1) -> embed in channel
-            # World state: [3, H, W] (obstacles, coverage, visits)
+            # Use the encoder's _encode_state method
+            tensor = self._temp_encoder._encode_state(
+                robot_state,
+                world_state,
+                agent_occupancy=occupancy
+            )
             
-            # For now, use world_state directly (FCN expects [C, H, W])
-            tensor = torch.FloatTensor(world_state)  # [3, H, W]
+            # Remove batch dimension [1, C, H, W] -> [C, H, W]
+            tensor = tensor.squeeze(0)
             tensors.append(tensor)
         
         return tensors
@@ -306,39 +344,44 @@ class QMIXAgent:
     
     def store_transition(self, 
                         observations: List[Dict],
-                        messages: List[any],
                         actions: List[int],
-                        reward: float,
+                        rewards: List[float],
                         next_observations: List[Dict],
                         done: bool,
                         state: any,
-                        next_state: any):
+                        next_state: any,
+                        agent_occupancies: Optional[List] = None,
+                        next_agent_occupancies: Optional[List] = None):
         """
         Store transition in replay buffer.
         
         Args:
             observations: List of observation dicts
-            messages: Communication messages (currently unused in QMIX)
             actions: List of actions taken
-            reward: Team reward
+            rewards: List of rewards (per agent)
             next_observations: List of next observation dicts
             done: Episode done flag
             state: Current MultiAgentState
             next_state: Next MultiAgentState
+            agent_occupancies: Optional list of current occupancy maps
+            next_agent_occupancies: Optional list of next occupancy maps
         """
-        # Convert observations to tensors
-        local_obs = self._observations_to_tensors(observations)
-        next_local_obs = self._observations_to_tensors(next_observations)
+        # Convert observations to tensors (with optional occupancy)
+        local_obs = self._observations_to_tensors(observations, agent_occupancies)
+        next_local_obs = self._observations_to_tensors(next_observations, next_agent_occupancies)
         
         # Extract global states
         global_state = self._extract_global_state(state)
         next_global_state = self._extract_global_state(next_state)
         
+        # Sum rewards for team reward (QMIX uses team reward)
+        team_reward = sum(rewards)
+        
         # Store in replay buffer
         self.memory.push(
             local_obs=local_obs,
             actions=actions,
-            reward=reward,
+            reward=team_reward,
             next_local_obs=next_local_obs,
             global_state=global_state,
             next_global_state=next_global_state,
@@ -399,7 +442,7 @@ class QMIXAgent:
             next_q_tot = self.target_mixer(next_qs, next_global_state)  # [batch]
             
             # Compute target
-            target_q = rewards + config.GAMMA * next_q_tot * (1 - dones)
+            target_q = rewards + self.gamma * next_q_tot * (1 - dones)
         
         # TD loss
         loss = F.mse_loss(current_q_tot, target_q)

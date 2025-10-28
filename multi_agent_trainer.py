@@ -43,6 +43,7 @@ class MultiAgentTrainer:
         coordination: CoordinationStrategy = CoordinationStrategy.INDEPENDENT,
         parameter_sharing: bool = True,
         shared_replay: bool = True,
+        input_channels: int = 5,
         learning_rate: float = None,
         gamma: float = None,
         device: str = None
@@ -56,6 +57,7 @@ class MultiAgentTrainer:
             coordination: Coordination strategy
             parameter_sharing: If True, all agents share same network
             shared_replay: If True, use single replay buffer
+            input_channels: Number of input channels (5 or 6)
             learning_rate: Learning rate (default from config)
             gamma: Discount factor (default from config)
             device: Compute device (default from config)
@@ -65,6 +67,7 @@ class MultiAgentTrainer:
         self.coordination = coordination
         self.parameter_sharing = parameter_sharing
         self.shared_replay = shared_replay
+        self.input_channels = input_channels
 
         # Device
         self.device = device or config.DEVICE
@@ -80,10 +83,11 @@ class MultiAgentTrainer:
                 grid_size=grid_size,
                 learning_rate=self.learning_rate,
                 gamma=self.gamma,
-                device=self.device
+                device=self.device,
+                input_channels=input_channels
             )
             self.agents = [self.shared_agent] * num_agents
-            print(f"✓ Using parameter sharing (1 network for {num_agents} agents)")
+            print(f"✓ Using parameter sharing (1 network for {num_agents} agents, {input_channels} channels)")
         else:
             # Independent agents
             self.agents = [
@@ -91,11 +95,12 @@ class MultiAgentTrainer:
                     grid_size=grid_size,
                     learning_rate=self.learning_rate,
                     gamma=self.gamma,
-                    device=self.device
+                    device=self.device,
+                    input_channels=input_channels
                 )
                 for _ in range(num_agents)
             ]
-            print(f"✓ Using independent networks ({num_agents} agents)")
+            print(f"✓ Using independent networks ({num_agents} agents, {input_channels} channels)")
 
         # Replay memory
         if shared_replay:
@@ -130,7 +135,8 @@ class MultiAgentTrainer:
     def select_actions(
         self,
         observations: List[Dict],
-        epsilon: Optional[float] = None
+        epsilon: Optional[float] = None,
+        agent_occupancies: Optional[List] = None
     ) -> List[int]:
         """
         Select actions for all agents (decentralized execution).
@@ -138,12 +144,16 @@ class MultiAgentTrainer:
         Args:
             observations: List of observation dicts (one per agent)
             epsilon: Override epsilon (default: use self.epsilon)
+            agent_occupancies: Optional list of occupancy maps (one per agent)
 
         Returns:
             actions: List of actions [action_0, ..., action_n-1]
         """
         if epsilon is None:
             epsilon = self.epsilon
+        
+        if agent_occupancies is None:
+            agent_occupancies = [None] * self.num_agents
 
         actions = []
 
@@ -151,8 +161,14 @@ class MultiAgentTrainer:
             agent = self.agents[i]
             robot_state = obs['robot_state']
             world_state = obs['world_state']
+            occupancy = agent_occupancies[i]
 
-            action = agent.select_action(robot_state, world_state, epsilon=epsilon)
+            action = agent.select_action(
+                robot_state, 
+                world_state, 
+                epsilon=epsilon,
+                agent_occupancy=occupancy
+            )
             actions.append(action)
 
         return actions
@@ -164,7 +180,9 @@ class MultiAgentTrainer:
         rewards: List[float],
         next_observations: List[Dict],
         done: bool,
-        info: Dict
+        info: Dict,
+        agent_occupancies: Optional[List] = None,
+        next_agent_occupancies: Optional[List] = None
     ):
         """
         Store transitions for all agents.
@@ -176,17 +194,32 @@ class MultiAgentTrainer:
             next_observations: List of next observations
             done: Episode done flag
             info: Info dict from environment
+            agent_occupancies: Optional list of current occupancy maps
+            next_agent_occupancies: Optional list of next occupancy maps
         """
+        if agent_occupancies is None:
+            agent_occupancies = [None] * self.num_agents
+        if next_agent_occupancies is None:
+            next_agent_occupancies = [None] * self.num_agents
+
         for i in range(self.num_agents):
             # Extract states
             robot_state = observations[i]['robot_state']
             world_state = observations[i]['world_state']
             next_robot_state = next_observations[i]['robot_state']
 
-            # Encode states
+            # Encode states (with optional occupancy)
             agent = self.agents[i]
-            state_tensor = agent._encode_state(robot_state, world_state)
-            next_state_tensor = agent._encode_state(next_robot_state, world_state)
+            state_tensor = agent._encode_state(
+                robot_state, 
+                world_state,
+                agent_occupancy=agent_occupancies[i]
+            )
+            next_state_tensor = agent._encode_state(
+                next_robot_state, 
+                world_state,
+                agent_occupancy=next_agent_occupancies[i]
+            )
 
             # Store in replay memory
             transition_info = {
@@ -272,7 +305,9 @@ class MultiAgentTrainer:
     def train_episode(
         self,
         env: MultiAgentCoverageEnv,
-        map_type: Optional[str] = None
+        map_type: Optional[str] = None,
+        comm_manager=None,
+        occupancy_computer=None
     ) -> Dict:
         """
         Train for one episode.
@@ -280,6 +315,8 @@ class MultiAgentTrainer:
         Args:
             env: Multi-agent environment
             map_type: Map type for this episode
+            comm_manager: Communication manager (optional)
+            occupancy_computer: Agent occupancy computer (optional)
 
         Returns:
             episode_info: Dict with episode metrics
@@ -297,21 +334,72 @@ class MultiAgentTrainer:
         done = False
 
         while not done:
-            # Select actions
-            actions = self.select_actions(observations, epsilon=self.epsilon)
+            # Communication phase (if enabled)
+            messages = []
+            if comm_manager is not None:
+                # Collect agent states for communication
+                agent_states = []
+                for i, obs in enumerate(observations):
+                    agent_states.append({
+                        'agent_id': i,
+                        'position': obs['robot_state'].position,
+                        'visited': obs['robot_state'].visited_positions,
+                        'timestamp': step_count
+                    })
+                
+                # Exchange messages
+                messages = comm_manager.communicate(observations, state)
+            
+            # Compute agent occupancies (if using 6 channels)
+            agent_occupancies = None
+            if occupancy_computer is not None and messages:
+                agent_occupancies = [
+                    occupancy_computer.compute(i, messages, step_count)
+                    for i in range(self.num_agents)
+                ]
+            
+            # Select actions (with optional occupancy)
+            actions = self.select_actions(
+                observations, 
+                epsilon=self.epsilon,
+                agent_occupancies=agent_occupancies
+            )
 
             # Execute actions
             next_state, rewards, done, info = env.step(actions)
             next_observations = env.get_observations()
 
-            # Store transitions
+            # Compute next occupancies (if using 6 channels)
+            next_agent_occupancies = None
+            if occupancy_computer is not None and messages:
+                # Update messages with new positions
+                next_agent_states = []
+                for i, obs in enumerate(next_observations):
+                    next_agent_states.append({
+                        'agent_id': i,
+                        'position': obs['robot_state'].position,
+                        'visited': obs['robot_state'].visited_positions,
+                        'timestamp': step_count + 1
+                    })
+                
+                # Recompute messages for next state
+                next_messages = comm_manager.communicate(next_observations, next_state) if comm_manager else messages
+                
+                next_agent_occupancies = [
+                    occupancy_computer.compute(i, next_messages, step_count + 1)
+                    for i in range(self.num_agents)
+                ]
+
+            # Store transitions (with optional occupancies)
             self.store_transitions(
                 observations,
                 actions,
                 rewards,
                 next_observations,
                 done,
-                info
+                info,
+                agent_occupancies=agent_occupancies,
+                next_agent_occupancies=next_agent_occupancies
             )
 
             # Optimize agents

@@ -289,6 +289,10 @@ class MultiAgentCoverageEnv:
             (1 - self.team_reward_weight) * ind_r + self.team_reward_weight * team_reward
             for ind_r in individual_rewards
         ]
+        
+        # Apply multi-agent reward normalization (CRITICAL for QMIX stability)
+        # Prevents gradient explosion when team rewards get very large
+        final_rewards = self._normalize_rewards(final_rewards)
 
         # Check termination
         done = self._check_done()
@@ -722,6 +726,48 @@ class MultiAgentCoverageEnv:
             return True
 
         return False
+    
+    def _normalize_rewards(self, rewards: List[float]) -> List[float]:
+        """
+        Normalize rewards for QMIX stability.
+        
+        Prevents gradient explosion when team rewards scale with number of agents.
+        Uses hybrid approach from QMIX (Rashid et al., 2018) and R2D2 (Pohlen et al., 2018).
+        
+        Args:
+            rewards: Raw rewards per agent
+            
+        Returns:
+            normalized_rewards: Scaled rewards in manageable range
+        """
+        if not config.MULTI_AGENT_REWARD_NORMALIZE_BY_N:
+            # No normalization - use raw rewards
+            normalized = rewards
+        else:
+            # Step 1: Normalize by number of agents
+            # This keeps total team reward same scale as single-agent
+            normalized = [r / self.num_agents for r in rewards]
+        
+        # Step 2: Apply scale factor
+        # Maps typical per-step rewards (0-20) to smaller range (0-2)
+        if config.MULTI_AGENT_REWARD_SCALE_FACTOR != 1.0:
+            normalized = [r / config.MULTI_AGENT_REWARD_SCALE_FACTOR for r in normalized]
+        
+        # Step 3: Optional clipping
+        if config.MULTI_AGENT_REWARD_CLIP_MIN is not None or config.MULTI_AGENT_REWARD_CLIP_MAX is not None:
+            clip_min = config.MULTI_AGENT_REWARD_CLIP_MIN if config.MULTI_AGENT_REWARD_CLIP_MIN is not None else -float('inf')
+            clip_max = config.MULTI_AGENT_REWARD_CLIP_MAX if config.MULTI_AGENT_REWARD_CLIP_MAX is not None else float('inf')
+            normalized = [np.clip(r, clip_min, clip_max) for r in normalized]
+        
+        # Step 4: Optional value rescaling (R2D2 style)
+        if config.MULTI_AGENT_USE_VALUE_RESCALING:
+            eps = config.MULTI_AGENT_VALUE_RESCALE_EPS
+            normalized = [
+                np.sign(r) * (np.sqrt(abs(r) + 1) - 1) + eps * r
+                for r in normalized
+            ]
+        
+        return normalized
 
     def _get_coverage_percentage(self) -> float:
         """Calculate coverage percentage."""
