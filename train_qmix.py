@@ -36,6 +36,7 @@ from communication import get_communication_protocol
 from agent_occupancy import AgentOccupancyComputer
 from collision_avoidance import CollisionAvoider
 from potential_based_shaping import get_shaper_config
+from coordination_metrics import CoordinationAnalyzer, CoordinationMetrics, coordination_score
 
 
 def create_directories():
@@ -58,18 +59,27 @@ def log_episode(episode: int, metrics: dict):
     agent_collisions = metrics.get('agent_collisions', 0)
     epsilon = metrics.get('epsilon', 0)
     loss = metrics.get('loss', None)
+    coord_score = metrics.get('coordination_score', 0)
+    coord_metrics = metrics.get('coordination_metrics', None)
 
     log_str = (f"Ep {episode:4d} | "
-               f"Reward: {team_reward:7.1f} | "
-               f"Coverage: {coverage*100:5.1f}% | "
-               f"Length: {length:3d} | "
-               f"Collisions: {collisions:2d} ({agent_collisions} agent) | "
-               f"Epsilon: {epsilon:.3f}")
+               f"Cov: {coverage*100:5.1f}% | "
+               f"Coord: {coord_score:.1f}/100 | "
+               f"Rew: {team_reward:7.1f} | "
+               f"Len: {length:3d} | "
+               f"Eps: {epsilon:.3f}")
     
     if loss is not None:
         log_str += f" | Loss: {loss:.4f}"
     
     print(log_str)
+    
+    # Print detailed coordination breakdown every 50 episodes
+    if coord_metrics and episode % 50 == 0:
+        print(f"  └─ Overlap: {coord_metrics.overlap.overlap_ratio*100:.1f}% | "
+              f"Efficiency: {coord_metrics.efficiency.exploration_efficiency*100:.1f}% | "
+              f"Balance: {coord_metrics.load_balance.balance_ratio:.2f} | "
+              f"Collisions: {coord_metrics.collisions.agent_agent + coord_metrics.collisions.agent_obstacle}")
 
 
 def validate_qmix(
@@ -107,6 +117,7 @@ def validate_qmix(
     all_rewards = []
     all_lengths = []
     all_collisions = []
+    all_coordination_scores = []
     per_map_results = {}
 
     for map_type in map_types:
@@ -122,6 +133,10 @@ def validate_qmix(
             episode_reward = 0
             step_count = 0
             episode_collisions = 0
+            episode_agent_collisions = 0
+            
+            # Initialize coordination tracking
+            coord_analyzer = CoordinationAnalyzer(env.num_agents, env.grid_size)
 
             done = False
 
@@ -148,18 +163,39 @@ def validate_qmix(
 
                 # Execute
                 state, rewards, done, info = env.step(actions)
-                observations = env.get_observations()
+                next_observations = env.get_observations()
 
                 episode_reward += sum(rewards)
                 episode_collisions += sum(info['collisions'])
+                episode_agent_collisions += sum(info['agent_collisions'])
+                
+                # Update coordination metrics
+                agent_positions = [obs['robot_state'].position for obs in next_observations]
+                agent_coverages = [len(obs['robot_state'].visited_positions) for obs in next_observations]
+                num_messages = len(messages) if messages else 0
+                coord_analyzer.update(
+                    agent_positions=agent_positions,
+                    agent_coverages=agent_coverages,
+                    world_state=state,
+                    num_agent_collisions=sum(info['agent_collisions']),
+                    num_obstacle_collisions=sum(info['collisions']) - sum(info['agent_collisions']),
+                    num_messages_sent=num_messages,
+                    step=step_count
+                )
+                
+                observations = next_observations
                 step_count += 1
 
             # Record metrics
             final_coverage = info['coverage_pct']
+            coord_metrics = coord_analyzer.finalize(step_count)
+            coord_score_val = coordination_score(coord_metrics)
+            
             map_coverages.append(final_coverage)
             map_rewards.append(episode_reward)
             map_lengths.append(step_count)
             map_collisions.append(episode_collisions)
+            all_coordination_scores.append(coord_score_val)
 
         # Aggregate for this map type
         per_map_results[map_type] = {
@@ -182,6 +218,8 @@ def validate_qmix(
         'mean_reward': np.mean(all_rewards),
         'mean_length': np.mean(all_lengths),
         'mean_collisions': np.mean(all_collisions),
+        'mean_coordination_score': np.mean(all_coordination_scores),
+        'std_coordination_score': np.std(all_coordination_scores),
         'per_map': per_map_results
     }
 
@@ -195,6 +233,8 @@ def validate_qmix(
         print(f"  Mean Reward: {results['mean_reward']:.1f}")
         print(f"  Mean Length: {results['mean_length']:.0f}")
         print(f"  Mean Collisions: {results['mean_collisions']:.1f}")
+        print(f"  Mean Coordination Score: {results['mean_coordination_score']:.1f}/100 "
+              f"(+/- {results['std_coordination_score']:.1f})")
         print(f"\nPer-Map Results:")
         for map_type, res in per_map_results.items():
             print(f"  {map_type:12s}: {res['mean_coverage']*100:.1f}%")
@@ -212,7 +252,8 @@ def train_qmix(
     collision_strategy: str = 'filter',
     use_pbrs: bool = False,
     pbrs_config: str = 'frontier',
-    experiment_name: Optional[str] = None
+    experiment_name: Optional[str] = None,
+    resume_from: Optional[str] = None
 ):
     """
     Main QMIX training loop.
@@ -247,6 +288,10 @@ def train_qmix(
     print(f"Communication: {comm_protocol}")
     print(f"Collision Strategy: {collision_strategy}")
     print(f"Curriculum: {use_curriculum}")
+    if config.USE_PROBABILISTIC_ENV:
+        print(f"Environment: PROBABILISTIC (sigmoid coverage)")
+    else:
+        print(f"Environment: BINARY (instant coverage)")
     print(f"PBRS: {use_pbrs} ({pbrs_config if use_pbrs else 'disabled'})")
     print(f"Total Episodes: {total_episodes}")
     print(f"{'='*70}\n")
@@ -274,6 +319,26 @@ def train_qmix(
         gamma=config.GAMMA,
         device=config.DEVICE
     )
+
+    # Load pre-trained single-agent checkpoint if provided
+    if resume_from is not None:
+        print(f"\n{'='*70}")
+        print(f"LOADING PRE-TRAINED CHECKPOINT")
+        print(f"{'='*70}")
+        print(f"Checkpoint: {resume_from}")
+        
+        import torch
+        checkpoint = torch.load(resume_from, map_location=config.DEVICE)
+        
+        # Load weights into each agent's Q-network
+        for i in range(num_agents):
+            qmix_agent.agent_qnets[i].load_state_dict(checkpoint['policy_net_state_dict'])
+            qmix_agent.target_qnets[i].load_state_dict(checkpoint['policy_net_state_dict'])
+            print(f"+ Loaded checkpoint into agent {i} Q-network")
+        
+        print(f"+ All {num_agents} agents initialized with same pre-trained weights")
+        print(f"+ Mixing network will be trained from scratch")
+        print(f"{'='*70}\n")
 
     # Initialize communication protocol
     comm_manager = get_communication_protocol(
@@ -356,6 +421,9 @@ def train_qmix(
         episode_collisions = 0
         episode_agent_collisions = 0
         episode_losses = []
+        
+        # Initialize coordination tracking
+        coord_analyzer = CoordinationAnalyzer(num_agents, grid_size)
 
         done = False
 
@@ -443,6 +511,20 @@ def train_qmix(
             episode_reward += sum(shaped_rewards)
             episode_collisions += sum(info['collisions'])
             episode_agent_collisions += sum(info['agent_collisions'])
+            
+            # Update coordination metrics
+            agent_positions = [obs['robot_state'].position for obs in next_observations]
+            agent_coverages = [len(obs['robot_state'].visited_positions) for obs in next_observations]
+            num_messages = len(messages) if messages else 0
+            coord_analyzer.update(
+                agent_positions=agent_positions,
+                agent_coverages=agent_coverages,
+                world_state=next_state,
+                num_agent_collisions=sum(info['agent_collisions']),
+                num_obstacle_collisions=sum(info['collisions']) - sum(info['agent_collisions']),
+                num_messages_sent=num_messages,
+                step=episode_length
+            )
 
             # Update for next step
             observations = next_observations
@@ -452,6 +534,8 @@ def train_qmix(
         # Episode metrics
         final_coverage = info['coverage_pct']
         mean_loss = np.mean(episode_losses) if episode_losses else None
+        coord_metrics = coord_analyzer.finalize(episode_length)
+        coord_score_val = coordination_score(coord_metrics)
 
         episode_metrics = {
             'team_reward': episode_reward,
@@ -460,7 +544,9 @@ def train_qmix(
             'collisions': episode_collisions,
             'agent_collisions': episode_agent_collisions,
             'epsilon': qmix_agent.epsilon,
-            'loss': mean_loss
+            'loss': mean_loss,
+            'coordination_score': coord_score_val,
+            'coordination_metrics': coord_metrics
         }
 
         # Log progress
@@ -630,7 +716,24 @@ def main():
         help='Experiment name (auto-generated if not provided)'
     )
 
+    parser.add_argument(
+        '--resume-from',
+        type=str,
+        default=None,
+        help='Path to single-agent checkpoint (fcn_final.pt) to initialize agent Q-networks'
+    )
+
+    parser.add_argument(
+        '--probabilistic',
+        action='store_true',
+        help='Use probabilistic environment (sigmoid coverage) instead of binary'
+    )
+
     args = parser.parse_args()
+
+    # Apply probabilistic environment setting if specified
+    if args.probabilistic:
+        config.USE_PROBABILISTIC_ENV = True
 
     # Train
     train_qmix(
@@ -643,7 +746,8 @@ def main():
         collision_strategy=args.collision_strategy,
         use_pbrs=args.use_pbrs,
         pbrs_config=args.pbrs_config,
-        experiment_name=args.experiment_name
+        experiment_name=args.experiment_name,
+        resume_from=args.resume_from
     )
 
 

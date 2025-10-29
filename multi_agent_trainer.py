@@ -20,6 +20,7 @@ from config import config
 from fcn_agent import FCNAgent
 from multi_agent_env import MultiAgentCoverageEnv, CoordinationStrategy, MultiAgentState
 from replay_memory import StratifiedReplayMemory
+from coordination_metrics import CoordinationAnalyzer, CoordinationMetrics, coordination_score
 
 
 class MultiAgentTrainer:
@@ -129,7 +130,8 @@ class MultiAgentTrainer:
             'episode_lengths': [],
             'losses': defaultdict(list),
             'collisions': [],
-            'agent_collisions': []
+            'agent_collisions': [],
+            'coordination_scores': []
         }
 
     def select_actions(
@@ -330,6 +332,9 @@ class MultiAgentTrainer:
         step_count = 0
         episode_collisions = 0
         episode_agent_collisions = 0
+        
+        # Initialize coordination tracking
+        coord_analyzer = CoordinationAnalyzer(self.num_agents, env.grid_size)
 
         done = False
 
@@ -419,6 +424,20 @@ class MultiAgentTrainer:
             # Track collisions
             episode_collisions += sum(info['collisions'])
             episode_agent_collisions += sum(info['agent_collisions'])
+            
+            # Update coordination metrics
+            agent_positions = [obs['robot_state'].position for obs in next_observations]
+            agent_coverages = [len(obs['robot_state'].visited_positions) for obs in next_observations]
+            num_messages = len(messages) if messages else 0
+            coord_analyzer.update(
+                agent_positions=agent_positions,
+                agent_coverages=agent_coverages,
+                world_state=next_state,
+                num_agent_collisions=sum(info['agent_collisions']),
+                num_obstacle_collisions=sum(info['collisions']) - sum(info['agent_collisions']),
+                num_messages_sent=num_messages,
+                step=step_count
+            )
 
             # Update for next step
             observations = next_observations
@@ -426,6 +445,8 @@ class MultiAgentTrainer:
 
         # Episode metrics
         final_coverage = info['coverage_pct']
+        coord_metrics = coord_analyzer.finalize(step_count)
+        coord_score_val = coordination_score(coord_metrics)
 
         episode_info = {
             'episode_rewards': episode_rewards,
@@ -434,7 +455,9 @@ class MultiAgentTrainer:
             'episode_length': step_count,
             'collisions': episode_collisions,
             'agent_collisions': episode_agent_collisions,
-            'epsilon': self.epsilon
+            'epsilon': self.epsilon,
+            'coordination_score': coord_score_val,
+            'coordination_metrics': coord_metrics
         }
 
         # Track metrics
@@ -444,6 +467,7 @@ class MultiAgentTrainer:
         self.metrics['episode_lengths'].append(step_count)
         self.metrics['collisions'].append(episode_collisions)
         self.metrics['agent_collisions'].append(episode_agent_collisions)
+        self.metrics['coordination_scores'].append(coord_score_val)
 
         return episode_info
 
@@ -451,7 +475,9 @@ class MultiAgentTrainer:
         self,
         env: MultiAgentCoverageEnv,
         num_episodes: int = 10,
-        map_types: Optional[List[str]] = None
+        map_types: Optional[List[str]] = None,
+        comm_manager=None,
+        occupancy_computer=None
     ) -> Dict:
         """
         Validate trained agents.
@@ -460,6 +486,8 @@ class MultiAgentTrainer:
             env: Multi-agent environment
             num_episodes: Number of validation episodes
             map_types: List of map types to test (default: all types)
+            comm_manager: Communication manager (optional)
+            occupancy_computer: Agent occupancy computer (optional)
 
         Returns:
             validation_results: Dict with validation metrics
@@ -478,6 +506,7 @@ class MultiAgentTrainer:
             'team_rewards': [],
             'lengths': [],
             'collisions': [],
+            'coordination_scores': [],
             'per_map_type': defaultdict(list)
         }
 
@@ -491,26 +520,68 @@ class MultiAgentTrainer:
             team_reward = 0.0
             step_count = 0
             episode_collisions = 0
+            episode_agent_collisions = 0
+            
+            # Initialize coordination tracking
+            coord_analyzer = CoordinationAnalyzer(self.num_agents, env.grid_size)
+            
             done = False
 
             while not done:
-                actions = self.select_actions(observations, epsilon=0.0)
+                # Communication phase (if enabled)
+                messages = []
+                if comm_manager is not None:
+                    messages = comm_manager.communicate(observations, state)
+                
+                # Compute agent occupancies (if using 6 channels)
+                agent_occupancies = None
+                if occupancy_computer is not None and messages:
+                    agent_occupancies = [
+                        occupancy_computer.compute(i, messages, step_count)
+                        for i in range(self.num_agents)
+                    ]
+                
+                # Select actions
+                actions = self.select_actions(
+                    observations, 
+                    epsilon=0.0,
+                    agent_occupancies=agent_occupancies
+                )
+                
                 next_state, rewards, done, info = env.step(actions)
                 next_observations = env.get_observations()
 
                 team_reward += sum(rewards)
                 episode_collisions += sum(info['collisions'])
+                episode_agent_collisions += sum(info['agent_collisions'])
+                
+                # Update coordination metrics
+                agent_positions = [obs['robot_state'].position for obs in next_observations]
+                agent_coverages = [len(obs['robot_state'].visited_positions) for obs in next_observations]
+                num_messages = len(messages) if messages else 0
+                coord_analyzer.update(
+                    agent_positions=agent_positions,
+                    agent_coverages=agent_coverages,
+                    world_state=next_state,
+                    num_agent_collisions=sum(info['agent_collisions']),
+                    num_obstacle_collisions=sum(info['collisions']) - sum(info['agent_collisions']),
+                    num_messages_sent=num_messages,
+                    step=step_count
+                )
+                
                 step_count += 1
-
                 observations = next_observations
 
             final_coverage = info['coverage_pct']
+            coord_metrics = coord_analyzer.finalize(step_count)
+            coord_score_val = coordination_score(coord_metrics)
 
             # Record results
             results['coverages'].append(final_coverage)
             results['team_rewards'].append(team_reward)
             results['lengths'].append(step_count)
             results['collisions'].append(episode_collisions)
+            results['coordination_scores'].append(coord_score_val)
             results['per_map_type'][map_type].append(final_coverage)
 
         # Restore epsilon
@@ -523,6 +594,8 @@ class MultiAgentTrainer:
             'mean_team_reward': np.mean(results['team_rewards']),
             'mean_length': np.mean(results['lengths']),
             'mean_collisions': np.mean(results['collisions']),
+            'mean_coordination_score': np.mean(results['coordination_scores']),
+            'std_coordination_score': np.std(results['coordination_scores']),
             'per_map_coverage': {
                 map_type: np.mean(coverages)
                 for map_type, coverages in results['per_map_type'].items()
@@ -599,6 +672,7 @@ class MultiAgentTrainer:
         recent_coverages = self.metrics['team_coverages'][-window:]
         recent_lengths = self.metrics['episode_lengths'][-window:]
         recent_collisions = self.metrics['collisions'][-window:]
+        recent_coord_scores = self.metrics['coordination_scores'][-window:] if self.metrics['coordination_scores'] else []
 
         stats = {
             'mean_team_reward': np.mean(recent_rewards),
@@ -608,6 +682,10 @@ class MultiAgentTrainer:
             'epsilon': self.epsilon,
             'total_episodes': len(self.metrics['team_rewards'])
         }
+        
+        # Add coordination score if available
+        if recent_coord_scores:
+            stats['mean_coordination_score'] = np.mean(recent_coord_scores)
 
         # Per-agent losses (if available)
         if self.parameter_sharing:

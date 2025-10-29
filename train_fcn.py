@@ -235,7 +235,7 @@ def train_fcn_stage1(
 
             # Validation
             if (episode + 1) % validate_interval == 0:
-                val_results = validate_fcn(agent, grid_size, verbose=verbose)
+                val_results = validate_fcn(agent, grid_size, verbose=verbose, use_6ch=use_6ch)
                 metrics.validation_scores[episode + 1] = val_results
 
                 if verbose:
@@ -295,7 +295,8 @@ def validate_fcn(
     agent: FCNAgent,
     grid_size: int = 20,
     num_episodes: int = None,
-    verbose: bool = True
+    verbose: bool = True,
+    use_6ch: bool = False
 ) -> dict:
     """
     Validate FCN agent on different map types.
@@ -305,6 +306,7 @@ def validate_fcn(
         grid_size: Grid size
         num_episodes: Episodes per map type (default from config)
         verbose: Print validation progress
+        use_6ch: If True, use dummy 6th channel (all zeros)
 
     Returns:
         results: Dictionary with coverage for each map type
@@ -317,6 +319,11 @@ def validate_fcn(
 
     # Validation with low epsilon (mostly greedy)
     agent.set_epsilon(0.1)
+    
+    # Create dummy occupancy if using 6 channels
+    dummy_occupancy = None
+    if use_6ch:
+        dummy_occupancy = np.zeros((grid_size, grid_size), dtype=np.float32)
 
     map_types = ['empty', 'random', 'room']
     results = {}
@@ -332,7 +339,7 @@ def validate_fcn(
             max_steps = config.VALIDATION_MAX_STEPS if config.FAST_VALIDATION else config.MAX_EPISODE_STEPS
 
             for step in range(max_steps):
-                action = agent.select_action(state, env.world_state)
+                action = agent.select_action(state, env.world_state, agent_occupancy=dummy_occupancy)
                 state, reward, done, info = env.step(action)
 
                 if done:
@@ -399,7 +406,7 @@ if __name__ == "__main__":
     print("FINAL VALIDATION")
     print("="*80)
 
-    final_results = validate_fcn(agent, grid_size=args.grid_size, num_episodes=20, verbose=True)
+    final_results = validate_fcn(agent, grid_size=args.grid_size, num_episodes=20, verbose=True, use_6ch=args.use_6ch)
 
     print(f"\nFinal Results:")
     print(f"  Empty Grid:   {final_results['empty']:.1%}")
