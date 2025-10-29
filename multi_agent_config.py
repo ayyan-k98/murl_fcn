@@ -35,7 +35,7 @@ class MultiAgentConfig:
     COMMUNICATION_FREQUENCY = 5
 
     # Coordination strategy
-    # Options: INDEPENDENT, VORONOI, MARKET, HIERARCHICAL
+    # Options: INDEPENDENT, HIERARCHICAL
     COORDINATION = CoordinationStrategy.INDEPENDENT
 
     # Team reward weight [0, 1]
@@ -125,23 +125,23 @@ class MultiAgentConfig:
             'epsilon_decay': 0.98
         },
         {
-            'name': 'Phase 4: Voronoi Coordination (4 agents)',
+            'name': 'Phase 4: Hierarchical Coordination (4 agents)',
             'start_ep': 450,
             'end_ep': 600,
             'num_agents': 4,
             'map_distribution': {'empty': 0.5, 'random': 0.3, 'maze': 0.2},
-            'coordination': CoordinationStrategy.VORONOI,
+            'coordination': CoordinationStrategy.HIERARCHICAL,
             'expected_coverage': 0.85,
             'epsilon_floor': 0.08,
             'epsilon_decay': 0.98
         },
         {
-            'name': 'Phase 5: Market Coordination (4 agents)',
+            'name': 'Phase 5: Advanced Coordination (4 agents)',
             'start_ep': 600,
             'end_ep': 750,
             'num_agents': 4,
             'map_distribution': {'empty': 0.4, 'random': 0.3, 'maze': 0.3},
-            'coordination': CoordinationStrategy.MARKET,
+            'coordination': CoordinationStrategy.HIERARCHICAL,
             'expected_coverage': 0.87,
             'epsilon_floor': 0.05,
             'epsilon_decay': 0.98
@@ -158,7 +158,7 @@ class MultiAgentConfig:
                 'office': 0.15,
                 'warehouse': 0.15
             },
-            'coordination': CoordinationStrategy.MARKET,
+            'coordination': CoordinationStrategy.HIERARCHICAL,
             'expected_coverage': 0.90,
             'epsilon_floor': 0.05,
             'epsilon_decay': 0.98
@@ -175,8 +175,7 @@ class MultiAgentConfig:
     # Test coordination strategies
     VALIDATION_STRATEGIES = [
         CoordinationStrategy.INDEPENDENT,
-        CoordinationStrategy.VORONOI,
-        CoordinationStrategy.MARKET
+        CoordinationStrategy.HIERARCHICAL
     ]
 
     # Test map types

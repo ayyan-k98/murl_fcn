@@ -33,8 +33,6 @@ from environment import CoverageEnvironment
 class CoordinationStrategy(Enum):
     """Multi-agent coordination strategies."""
     INDEPENDENT = "independent"  # No coordination, purely independent agents
-    VORONOI = "voronoi"  # Voronoi-based spatial partitioning
-    MARKET = "market"  # Market-based task allocation (bid on frontiers)
     HIERARCHICAL = "hierarchical"  # Leader assigns tasks to followers
 
 
@@ -43,8 +41,8 @@ class AgentState:
     """State of a single agent in multi-agent setting."""
     agent_id: int
     robot_state: RobotState
-    assigned_region: Optional[Set[Tuple[int, int]]] = None  # For Voronoi/Hierarchical
-    task_assignment: Optional[Tuple[int, int]] = None  # For Market/Hierarchical
+    assigned_region: Optional[Set[Tuple[int, int]]] = None  # For Hierarchical
+    task_assignment: Optional[Tuple[int, int]] = None  # For Hierarchical
     communication_range: float = 5.0
 
     def reset_assignment(self):
@@ -614,104 +612,16 @@ class MultiAgentCoverageEnv:
         if self.coordination == CoordinationStrategy.INDEPENDENT:
             pass  # No coordination
 
-        elif self.coordination == CoordinationStrategy.VORONOI:
-            self._update_voronoi_regions()
-
-        elif self.coordination == CoordinationStrategy.MARKET:
-            self.market_bids = {i: {} for i in range(self.num_agents)}
-
         elif self.coordination == CoordinationStrategy.HIERARCHICAL:
             # Agent 0 is leader
             self.leader_id = 0
 
     def _update_coordination(self):
         """Update coordination strategy (called every step)."""
-        if self.coordination == CoordinationStrategy.VORONOI:
-            # Update Voronoi regions every N steps
-            if self.state.step_count % 10 == 0:
-                self._update_voronoi_regions()
-
-        elif self.coordination == CoordinationStrategy.MARKET:
-            # Market-based task allocation every N steps
-            if self.state.step_count % 20 == 0:
-                self._market_allocation()
-
-        elif self.coordination == CoordinationStrategy.HIERARCHICAL:
+        if self.coordination == CoordinationStrategy.HIERARCHICAL:
             # Leader assigns tasks every N steps
             if self.state.step_count % 15 == 0:
                 self._hierarchical_assignment()
-
-    def _update_voronoi_regions(self):
-        """Compute Voronoi regions for spatial partitioning."""
-        agent_positions = self.state.get_agent_positions()
-
-        self.voronoi_regions = {i: set() for i in range(self.num_agents)}
-
-        # For each cell, assign to nearest agent
-        for x in range(self.grid_size):
-            for y in range(self.grid_size):
-                cell = (x, y)
-
-                if cell in self.state.world_state.obstacles:
-                    continue
-
-                # Find nearest agent
-                min_dist = float('inf')
-                nearest_agent = 0
-
-                for i, agent_pos in enumerate(agent_positions):
-                    dist = math.sqrt(
-                        (x - agent_pos[0])**2 + (y - agent_pos[1])**2
-                    )
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest_agent = i
-
-                self.voronoi_regions[nearest_agent].add(cell)
-
-        # Update agent assignments
-        for i, agent in enumerate(self.state.agents):
-            agent.assigned_region = self.voronoi_regions[i]
-
-    def _market_allocation(self):
-        """Market-based task allocation (simplified)."""
-        # Identify frontier cells
-        frontier_cells = self._identify_frontier_cells()
-
-        if len(frontier_cells) == 0:
-            return
-
-        # Each agent bids on frontiers (bid = -distance)
-        bids = {i: {} for i in range(self.num_agents)}
-
-        for i, agent in enumerate(self.state.agents):
-            agent_pos = agent.robot_state.position
-
-            for frontier in frontier_cells:
-                distance = math.sqrt(
-                    (frontier[0] - agent_pos[0])**2 +
-                    (frontier[1] - agent_pos[1])**2
-                )
-                bids[i][frontier] = -distance  # Higher bid = closer
-
-        # Allocate frontiers to highest bidders
-        allocated = set()
-        for frontier in frontier_cells:
-            if frontier in allocated:
-                continue
-
-            # Find highest bidder
-            max_bid = -float('inf')
-            winner = 0
-
-            for i in range(self.num_agents):
-                if frontier in bids[i] and bids[i][frontier] > max_bid:
-                    max_bid = bids[i][frontier]
-                    winner = i
-
-            # Assign to winner
-            self.state.agents[winner].task_assignment = frontier
-            allocated.add(frontier)
 
     def _hierarchical_assignment(self):
         """Hierarchical task assignment (leader assigns tasks)."""

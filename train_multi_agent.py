@@ -4,7 +4,7 @@ Multi-Agent Training Script
 Train multi-robot coverage system with CTDE and curriculum learning.
 
 Usage:
-    python train_multi_agent.py --episodes 1000 --coordination market
+    python train_multi_agent.py --episodes 1000 --coordination hierarchical
     python train_multi_agent.py --episodes 1000 --agents 4 --parameter_sharing
 
 Key Features:
@@ -406,7 +406,7 @@ def main():
         '--coordination',
         type=str,
         default='independent',
-        choices=['independent', 'voronoi', 'market', 'hierarchical'],
+        choices=['independent', 'hierarchical'],
         help='Coordination strategy'
     )
 
@@ -438,7 +438,7 @@ def main():
         '--comm-protocol',
         type=str,
         default='none',
-        choices=['none', 'full_state', 'attention', 'commnet', 'targeted'],
+        choices=['none', 'full_state'],
         help='Communication protocol (default: none)'
     )
 
@@ -471,8 +471,6 @@ def main():
     # Parse coordination strategy
     coordination_map = {
         'independent': CoordinationStrategy.INDEPENDENT,
-        'voronoi': CoordinationStrategy.VORONOI,
-        'market': CoordinationStrategy.MARKET,
         'hierarchical': CoordinationStrategy.HIERARCHICAL
     }
     coordination = coordination_map[args.coordination]

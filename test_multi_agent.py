@@ -100,8 +100,6 @@ def test_coordination_strategies():
 
     strategies = [
         CoordinationStrategy.INDEPENDENT,
-        CoordinationStrategy.VORONOI,
-        CoordinationStrategy.MARKET,
         CoordinationStrategy.HIERARCHICAL
     ]
 
@@ -294,13 +292,13 @@ def test_integration():
     env = MultiAgentCoverageEnv(
         num_agents=4,
         grid_size=20,
-        coordination=CoordinationStrategy.VORONOI
+        coordination=CoordinationStrategy.HIERARCHICAL
     )
 
     trainer = MultiAgentTrainer(
         num_agents=4,
         grid_size=20,
-        coordination=CoordinationStrategy.VORONOI,
+        coordination=CoordinationStrategy.HIERARCHICAL,
         parameter_sharing=True,
         shared_replay=True
     )
@@ -324,7 +322,7 @@ def test_integration():
         new_trainer = MultiAgentTrainer(
             num_agents=4,
             grid_size=20,
-            coordination=CoordinationStrategy.VORONOI,
+            coordination=CoordinationStrategy.HIERARCHICAL,
             parameter_sharing=True
         )
         new_trainer.load(save_path)
