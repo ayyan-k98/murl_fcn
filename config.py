@@ -96,8 +96,14 @@ class Config:
     STEP_PENALTY: float = -0.01        # RESTORED from -0.0005
     STAY_PENALTY: float = -0.1         # RESTORED from -0.005
     
-    # Probabilistic environment scaling
-    PROBABILISTIC_REWARD_SCALE: float = 0.15  # Keep proven value
+    # Probabilistic environment parameters
+    PROBABILISTIC_REWARD_SCALE: float = 0.15  # Reward scaling for probabilistic mode
+    
+    # Distance-based coverage sensor model (Equation 4 from paper)
+    # P_cov(cell | robot) = 1 / (1 + e^(k*(r - r0)))
+    # where r is euclidean distance, r0 is midpoint, k is steepness
+    PROBABILISTIC_COVERAGE_MIDPOINT: float = 1.5   # r0: distance where P_cov = 0.5
+    PROBABILISTIC_COVERAGE_STEEPNESS: float = 2.0  # k: sigmoid steepness (higher = sharper falloff)
 
     # ==================== Multi-Agent Reward Normalization ====================
     # CRITICAL: Normalize rewards for QMIX to prevent gradient explosion

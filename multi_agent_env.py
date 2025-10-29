@@ -452,9 +452,27 @@ class MultiAgentCoverageEnv:
                 agent.robot_state.visited_positions.add(intended_pos)
                 agent.robot_state.visit_heat[intended_pos[0], intended_pos[1]] += 1
 
-                # Update coverage map (agent presence covers cell)
-                self.state.world_state.coverage_map[intended_pos[0], intended_pos[1]] = 1.0
-                agent.robot_state.coverage_history[intended_pos[0], intended_pos[1]] = 1.0
+                # Update coverage map based on distance from agent
+                if config.USE_PROBABILISTIC_ENV:
+                    # Probabilistic coverage: distance-based sensor model
+                    # P_cov(cell | robot_pos) = 1 / (1 + e^(k*(r - r0)))
+                    distance = 0.0  # Agent is at this position
+                    
+                    # Sigmoid parameters
+                    r0 = config.PROBABILISTIC_COVERAGE_MIDPOINT
+                    k = config.PROBABILISTIC_COVERAGE_STEEPNESS
+                    
+                    # Coverage probability at agent position (distance=0)
+                    p_cov = 1.0 / (1.0 + np.exp(k * (distance - r0)))
+                    
+                    # Update coverage (take maximum)
+                    new_coverage = max(self.state.world_state.coverage_map[intended_pos[0], intended_pos[1]], p_cov)
+                    self.state.world_state.coverage_map[intended_pos[0], intended_pos[1]] = new_coverage
+                    agent.robot_state.coverage_history[intended_pos[0], intended_pos[1]] = new_coverage
+                else:
+                    # Binary coverage: instant 100%
+                    self.state.world_state.coverage_map[intended_pos[0], intended_pos[1]] = 1.0
+                    agent.robot_state.coverage_history[intended_pos[0], intended_pos[1]] = 1.0
 
             collisions.append(collision)
             agent_collisions.append(agent_collision)
@@ -471,13 +489,35 @@ class MultiAgentCoverageEnv:
             agent.robot_state.orientation
         )
 
-        # Update local map
+        # Update local map and coverage
         for cell in sensed_cells:
             if cell in self.state.world_state.obstacles:
                 agent.robot_state.local_map[cell] = (0.0, "obstacle")
             else:
-                coverage = self.state.world_state.coverage_map[cell[0], cell[1]]
-                agent.robot_state.local_map[cell] = (coverage, "free")
+                # Update coverage based on distance (probabilistic mode)
+                if config.USE_PROBABILISTIC_ENV:
+                    # Distance-based coverage probability
+                    distance = np.sqrt((cell[0] - agent.robot_state.position[0])**2 + 
+                                     (cell[1] - agent.robot_state.position[1])**2)
+                    
+                    r0 = config.PROBABILISTIC_COVERAGE_MIDPOINT
+                    k = config.PROBABILISTIC_COVERAGE_STEEPNESS
+                    
+                    # Coverage probability decreases with distance
+                    p_cov = 1.0 / (1.0 + np.exp(k * (distance - r0)))
+                    
+                    # Update coverage (take maximum of current and new)
+                    current_cov = self.state.world_state.coverage_map[cell[0], cell[1]]
+                    new_coverage = max(current_cov, p_cov)
+                    self.state.world_state.coverage_map[cell[0], cell[1]] = new_coverage
+                    agent.robot_state.coverage_history[cell[0], cell[1]] = new_coverage
+                    
+                    # Update local map with new coverage
+                    agent.robot_state.local_map[cell] = (new_coverage, "free")
+                else:
+                    # Binary mode: only update local map
+                    coverage = self.state.world_state.coverage_map[cell[0], cell[1]]
+                    agent.robot_state.local_map[cell] = (coverage, "free")
 
     def _raycast_sensing(
         self,
@@ -547,8 +587,11 @@ class MultiAgentCoverageEnv:
         """Calculate individual agent reward."""
         reward = 0.0
 
-        # Coverage reward
-        reward += coverage_gain * config.COVERAGE_REWARD
+        # Coverage reward (scale for probabilistic mode)
+        coverage_reward_scale = config.COVERAGE_REWARD
+        if config.USE_PROBABILISTIC_ENV:
+            coverage_reward_scale *= config.PROBABILISTIC_REWARD_SCALE
+        reward += coverage_gain * coverage_reward_scale
 
         # Exploration reward
         reward += knowledge_gain * config.EXPLORATION_REWARD

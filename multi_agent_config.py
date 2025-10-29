@@ -27,6 +27,12 @@ class MultiAgentConfig:
 
     # Communication range between agents
     COMMUNICATION_RANGE = 5.0
+    
+    # Communication frequency (every N steps)
+    # 1 = every step (high overhead but perfect info)
+    # 5 = every 5 steps (balanced, recommended)
+    # 10 = every 10 steps (low overhead but stale info)
+    COMMUNICATION_FREQUENCY = 5
 
     # Coordination strategy
     # Options: INDEPENDENT, VORONOI, MARKET, HIERARCHICAL
@@ -35,11 +41,21 @@ class MultiAgentConfig:
     # Team reward weight [0, 1]
     # 0.0 = purely individual rewards
     # 1.0 = purely team rewards
-    # 0.5 = balanced
-    TEAM_REWARD_WEIGHT = 0.5
+    # 0.3 = recommended (emphasize individual + coordination)
+    TEAM_REWARD_WEIGHT = 0.3
 
     # Agent-agent collision penalty
     AGENT_COLLISION_PENALTY = -5.0
+    
+    # Team reward components
+    USE_OVERLAP_PENALTY = True
+    OVERLAP_PENALTY_SCALE = 2.0  # Penalty per overlapping cell
+    
+    USE_DIVERSITY_BONUS = True
+    DIVERSITY_BONUS_SCALE = 0.5  # Reward for maintaining distance
+    
+    USE_EFFICIENCY_BONUS = True
+    EFFICIENCY_BONUS_SCALE = 5.0  # Reward coverage/visits ratio
 
     # ============================================================================
     # Training Settings

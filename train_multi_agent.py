@@ -62,7 +62,9 @@ def validate_and_save(
     episode: int,
     trainer: MultiAgentTrainer,
     env: MultiAgentCoverageEnv,
-    experiment_name: str
+    experiment_name: str,
+    comm_manager=None,
+    occupancy_computer=None
 ):
     """Run validation and save checkpoint."""
     print(f"\n{'='*70}")
@@ -73,7 +75,9 @@ def validate_and_save(
     val_results = trainer.validate(
         env,
         num_episodes=ma_config.VALIDATION_EPISODES,
-        map_types=ma_config.VALIDATION_MAP_TYPES
+        map_types=ma_config.VALIDATION_MAP_TYPES,
+        comm_manager=comm_manager,
+        occupancy_computer=occupancy_computer
     )
 
     print(f"\nValidation Results:")
@@ -82,6 +86,8 @@ def validate_and_save(
     print(f"  Mean Team Reward: {val_results['mean_team_reward']:.1f}")
     print(f"  Mean Length: {val_results['mean_length']:.0f}")
     print(f"  Mean Collisions: {val_results['mean_collisions']:.1f}")
+    print(f"  Mean Coordination Score: {val_results['mean_coordination_score']:.1f}/100 "
+          f"(±{val_results['std_coordination_score']:.1f})")
 
     print(f"\nPer-Map Coverage:")
     for map_type, coverage in val_results['per_map_coverage'].items():
@@ -109,7 +115,8 @@ def train_multi_agent(
     use_curriculum: bool = True,
     use_6ch: bool = False,
     comm_protocol: str = 'none',
-    experiment_name: Optional[str] = None
+    experiment_name: Optional[str] = None,
+    resume_from: Optional[str] = None
 ):
     """
     Main multi-agent training loop.
@@ -143,6 +150,10 @@ def train_multi_agent(
     print(f"Parameter Sharing: {parameter_sharing}")
     print(f"Shared Replay: {shared_replay}")
     print(f"Curriculum: {use_curriculum}")
+    if config.USE_PROBABILISTIC_ENV:
+        print(f"Environment: PROBABILISTIC (sigmoid coverage)")
+    else:
+        print(f"Environment: BINARY (instant coverage)")
     print(f"Total Episodes: {total_episodes}")
     print(f"{'='*70}\n")
 
@@ -169,6 +180,27 @@ def train_multi_agent(
         shared_replay=shared_replay,
         input_channels=6 if use_6ch else 5
     )
+
+    # Load pre-trained single-agent checkpoint if provided
+    if resume_from is not None:
+        print(f"\n{'='*70}")
+        print(f"LOADING PRE-TRAINED CHECKPOINT")
+        print(f"{'='*70}")
+        print(f"Checkpoint: {resume_from}")
+        
+        if parameter_sharing:
+            # Load into shared agent
+            trainer.agents[0].load(resume_from)
+            print(f"✓ Loaded checkpoint into shared agent network")
+            print(f"  All {num_agents} agents will use this pre-trained network")
+        else:
+            # Load into all independent agents
+            for i, agent in enumerate(trainer.agents):
+                agent.load(resume_from)
+                print(f"✓ Loaded checkpoint into agent {i}")
+            print(f"  All {num_agents} agents initialized with same pre-trained weights")
+        
+        print(f"{'='*70}\n")
 
     # Initialize communication protocol
     comm_manager = get_communication_protocol(
@@ -250,7 +282,23 @@ def train_multi_agent(
 
         # Log progress
         if episode % ma_config.LOG_FREQ == 0:
-            log_episode(episode, episode_info, trainer)
+            # Enhanced logging with coordination metrics
+            coord_score = episode_info.get('coordination_score', 0.0)
+            coord_metrics = episode_info.get('coordination_metrics', None)
+            
+            print(f"Ep {episode} | "
+                  f"Cov: {episode_info['team_coverage']:.1f}% | "
+                  f"Coord: {coord_score:.1f}/100 | "
+                  f"Rew: {episode_info['team_reward']:.1f} | "
+                  f"Len: {episode_info['episode_length']} | "
+                  f"Eps: {trainer.epsilon:.3f}")
+            
+            if coord_metrics and episode % (ma_config.LOG_FREQ * 5) == 0:
+                # Print detailed coordination breakdown every 5*LOG_FREQ episodes
+                print(f"  Overlap: {coord_metrics.overlap.overlap_ratio*100:.1f}% | "
+                      f"Efficiency: {coord_metrics.efficiency.exploration_efficiency*100:.1f}% | "
+                      f"Balance: {coord_metrics.load_balance.balance_ratio:.2f} | "
+                      f"Collisions: {coord_metrics.collisions.agent_agent + coord_metrics.collisions.agent_obstacle}")
 
         # Validation
         if (episode + 1) % ma_config.VALIDATION_FREQ == 0:
@@ -258,7 +306,9 @@ def train_multi_agent(
                 episode + 1,
                 trainer,
                 env,
-                experiment_name
+                experiment_name,
+                comm_manager=comm_manager,
+                occupancy_computer=occupancy_computer
             )
             all_validation_results.append({
                 'episode': episode + 1,
@@ -275,6 +325,10 @@ def train_multi_agent(
             print(f"  Mean Coverage (100 ep): {stats['mean_coverage']*100:.1f}%")
             print(f"  Mean Length (100 ep): {stats['mean_length']:.0f}")
             print(f"  Mean Collisions (100 ep): {stats['mean_collisions']:.1f}")
+            
+            if 'mean_coordination_score' in stats:
+                print(f"  Mean Coordination (100 ep): {stats['mean_coordination_score']:.1f}/100")
+            
             print(f"  Epsilon: {stats['epsilon']:.3f}")
 
             if 'mean_loss' in stats:
@@ -298,7 +352,9 @@ def train_multi_agent(
         total_episodes,
         trainer,
         env,
-        experiment_name
+        experiment_name,
+        comm_manager=comm_manager,
+        occupancy_computer=occupancy_computer
     )
 
     # Save final model
@@ -393,7 +449,24 @@ def main():
         help='Experiment name (auto-generated if not provided)'
     )
 
+    parser.add_argument(
+        '--resume-from',
+        type=str,
+        default=None,
+        help='Path to single-agent checkpoint (fcn_final.pt) to initialize agent networks'
+    )
+
+    parser.add_argument(
+        '--probabilistic',
+        action='store_true',
+        help='Use probabilistic environment (sigmoid coverage) instead of binary'
+    )
+
     args = parser.parse_args()
+
+    # Apply probabilistic environment setting if specified
+    if args.probabilistic:
+        config.USE_PROBABILISTIC_ENV = True
 
     # Parse coordination strategy
     coordination_map = {
@@ -414,7 +487,8 @@ def main():
         use_curriculum=not args.no_curriculum,
         use_6ch=args.use_6ch,
         comm_protocol=args.comm_protocol,
-        experiment_name=args.experiment_name
+        experiment_name=args.experiment_name,
+        resume_from=args.resume_from
     )
 
 

@@ -231,10 +231,30 @@ class CoverageEnvironment:
                 coverage = self.world_state.coverage_map[cell[0], cell[1]]
                 self.robot_state.local_map[cell] = (coverage, "free")
 
-                # Update coverage (agent presence covers cell)
-                if cell == self.robot_state.position:
-                    self.world_state.coverage_map[cell[0], cell[1]] = 1.0
-                    self.robot_state.coverage_history[cell[0], cell[1]] = 1.0
+                # Update coverage based on distance from robot
+                if config.USE_PROBABILISTIC_ENV:
+                    # Probabilistic coverage: distance-based sensor model
+                    # P_cov(cell | robot_pos) = 1 / (1 + e^(k*(r - r0)))
+                    # where r is distance, r0 is sigmoid midpoint, k is steepness
+                    distance = np.sqrt((cell[0] - self.robot_state.position[0])**2 + 
+                                     (cell[1] - self.robot_state.position[1])**2)
+                    
+                    # Sigmoid parameters (tuned for sensor range)
+                    r0 = config.PROBABILISTIC_COVERAGE_MIDPOINT  # Midpoint distance
+                    k = config.PROBABILISTIC_COVERAGE_STEEPNESS  # Steepness
+                    
+                    # Coverage probability based on distance
+                    p_cov = 1.0 / (1.0 + np.exp(k * (distance - r0)))
+                    
+                    # Update coverage (take maximum of current and new observation)
+                    new_coverage = max(self.world_state.coverage_map[cell[0], cell[1]], p_cov)
+                    self.world_state.coverage_map[cell[0], cell[1]] = new_coverage
+                    self.robot_state.coverage_history[cell[0], cell[1]] = new_coverage
+                else:
+                    # Binary coverage: instant 100% at robot position
+                    if cell == self.robot_state.position:
+                        self.world_state.coverage_map[cell[0], cell[1]] = 1.0
+                        self.robot_state.coverage_history[cell[0], cell[1]] = 1.0
 
     def _raycast_sensing(self, position: Tuple[int, int], orientation: float) -> Set[Tuple[int, int]]:
         """
