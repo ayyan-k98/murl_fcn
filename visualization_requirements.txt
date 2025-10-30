@@ -1,0 +1,12 @@
+# Visualization Requirements
+# Install with: pip install -r visualization_requirements.txt
+
+# Core visualization
+matplotlib>=3.5.0
+imageio>=2.9.0
+imageio-ffmpeg>=0.4.5  # For video/GIF support
+
+# Already required by project (listed for completeness)
+numpy>=1.21.0
+torch>=1.10.0
+networkx>=2.6.0

@@ -179,7 +179,7 @@ class MultiAgentConfig:
     ]
 
     # Test map types
-    VALIDATION_MAP_TYPES = ['empty', 'random', 'maze', 'office', 'warehouse']
+    VALIDATION_MAP_TYPES = ['empty', 'random', 'room', 'corridor', 'cave']
 
     # ============================================================================
     # Logging and Visualization

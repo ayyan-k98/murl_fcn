@@ -25,6 +25,11 @@ from typing import Optional
 from multi_agent_env import MultiAgentCoverageEnv, CoordinationStrategy
 from multi_agent_trainer import MultiAgentTrainer
 from multi_agent_config import ma_config
+from multi_agent_curriculum import (
+    get_multi_agent_curriculum_phase,
+    get_multi_agent_epsilon,
+    get_multi_agent_map_type
+)
 from config import config
 from communication import get_communication_protocol
 from agent_occupancy import AgentOccupancyComputer
@@ -150,10 +155,9 @@ def train_multi_agent(
     print(f"Parameter Sharing: {parameter_sharing}")
     print(f"Shared Replay: {shared_replay}")
     print(f"Curriculum: {use_curriculum}")
+    print(f"Environment: {'PROBABILISTIC' if config.USE_PROBABILISTIC_ENV else 'BINARY'} (USE_PROBABILISTIC_ENV={config.USE_PROBABILISTIC_ENV})")
     if config.USE_PROBABILISTIC_ENV:
-        print(f"Environment: PROBABILISTIC (sigmoid coverage)")
-    else:
-        print(f"Environment: BINARY (instant coverage)")
+        print(f"  Sigmoid: k={config.PROBABILISTIC_COVERAGE_STEEPNESS}, r0={config.PROBABILISTIC_COVERAGE_MIDPOINT}, threshold={config.COVERAGE_THRESHOLD}")
     print(f"Total Episodes: {total_episodes}")
     print(f"{'='*70}\n")
 
@@ -236,36 +240,27 @@ def train_multi_agent(
 
         # Update curriculum phase
         if use_curriculum:
-            phase = ma_config.get_phase(episode)
+            phase = get_multi_agent_curriculum_phase(episode)
 
             if phase != current_phase:
                 current_phase = phase
                 print(f"\n{'='*70}")
                 print(f"CURRICULUM PHASE CHANGE @ Episode {episode}")
                 print(f"{'='*70}")
-                print(f"Phase: {phase['name']}")
-                print(f"Episodes: {phase['start_ep']}-{phase['end_ep']}")
-                print(f"Expected Coverage: {phase['expected_coverage']*100:.0f}%")
-                print(f"Epsilon Floor: {phase['epsilon_floor']}")
+                print(f"Phase: {phase.description}")
+                print(f"Episodes: {phase.episode_start}-{phase.episode_end}")
+                print(f"Coverage Target: {phase.coverage_target*100:.0f}%")
+                print(f"Overlap Target: ≤{phase.overlap_target*100:.0f}%")
+                print(f"Epsilon: {phase.epsilon_start:.3f} → {phase.epsilon_end:.3f}")
                 print(f"{'='*70}\n")
 
-                # Update environment configuration
-                if phase['num_agents'] != num_agents:
-                    print(f"⚠ Warning: Phase requires {phase['num_agents']} agents, "
-                          f"but training with {num_agents}. Continuing...")
-
-                # Update coordination if different
-                if phase['coordination'] != env.coordination:
-                    env.coordination = phase['coordination']
-                    print(f"✓ Updated coordination to {phase['coordination'].value}")
-
             # Get map type from curriculum
-            map_type = ma_config.get_map_type(episode)
+            map_type = get_multi_agent_map_type(episode)
 
             # Update epsilon based on curriculum
-            epsilon_floor = phase['epsilon_floor']
-            trainer.epsilon = max(epsilon_floor, trainer.epsilon * phase['epsilon_decay'])
-            trainer.set_epsilon(trainer.epsilon)
+            epsilon = get_multi_agent_epsilon(episode)
+            trainer.epsilon = epsilon
+            trainer.set_epsilon(epsilon)
 
         else:
             # No curriculum - use default settings
@@ -287,18 +282,27 @@ def train_multi_agent(
             coord_metrics = episode_info.get('coordination_metrics', None)
             
             print(f"Ep {episode} | "
-                  f"Cov: {episode_info['team_coverage']:.1f}% | "
+                  f"Cov: {episode_info['team_coverage']*100:.1f}% | "
                   f"Coord: {coord_score:.1f}/100 | "
                   f"Rew: {episode_info['team_reward']:.1f} | "
                   f"Len: {episode_info['episode_length']} | "
                   f"Eps: {trainer.epsilon:.3f}")
             
+            # DEBUG: Print coverage map statistics
+            # Show Agent 0's local coverage (not shared world_state coverage_map)
+            observations = env.get_observations()
+            if observations:
+                cov_map = observations[0]['robot_state'].coverage_history
+                print(f"  [DEBUG] Steps={episode_info['episode_length']} | "
+                      f"Agent0 coverage: min={np.min(cov_map):.3f}, max={np.max(cov_map):.3f}, "
+                      f"mean={np.mean(cov_map):.3f}, cells>0.85={np.sum(cov_map >= 0.85)}")
+            
             if coord_metrics and episode % (ma_config.LOG_FREQ * 5) == 0:
                 # Print detailed coordination breakdown every 5*LOG_FREQ episodes
-                print(f"  Overlap: {coord_metrics.overlap.overlap_ratio*100:.1f}% | "
-                      f"Efficiency: {coord_metrics.efficiency.exploration_efficiency*100:.1f}% | "
-                      f"Balance: {coord_metrics.load_balance.balance_ratio:.2f} | "
-                      f"Collisions: {coord_metrics.collisions.agent_agent + coord_metrics.collisions.agent_obstacle}")
+                print(f"  Overlap: {coord_metrics.overlap_ratio*100:.1f}% | "
+                      f"Efficiency: {coord_metrics.exploration_efficiency*100:.1f}% | "
+                      f"Balance: {coord_metrics.load_balance_ratio:.2f} | "
+                      f"Collisions: {coord_metrics.agent_collisions + coord_metrics.obstacle_collisions}")
 
         # Validation
         if (episode + 1) % ma_config.VALIDATION_FREQ == 0:

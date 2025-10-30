@@ -49,6 +49,19 @@ class CommunicationProtocol:
         self.num_agents = num_agents
         self.message_dim = message_dim
 
+    def communicate(self, observations: List[Dict], state) -> List[Message]:
+        """
+        Main communication interface.
+        
+        Args:
+            observations: List of agent observations
+            state: Current world state
+            
+        Returns:
+            messages: List of messages exchanged between agents
+        """
+        raise NotImplementedError
+
     def encode_message(self, agent_id: int, hidden_state: torch.Tensor) -> Message:
         """Encode hidden state into message."""
         raise NotImplementedError
@@ -64,6 +77,10 @@ class CommunicationProtocol:
 
 class NoCommunciation(CommunicationProtocol):
     """Baseline: No communication between agents."""
+
+    def communicate(self, observations: List[Dict], state) -> List[Message]:
+        """No communication - return empty list."""
+        return []
 
     def encode_message(self, agent_id: int, hidden_state: torch.Tensor) -> Message:
         return Message(
@@ -91,6 +108,32 @@ class FullStateSharing(CommunicationProtocol):
     def __init__(self, num_agents: int, grid_size: int = 20):
         super().__init__(num_agents, message_dim=grid_size*grid_size + 2)
         self.grid_size = grid_size
+
+    def communicate(self, observations: List[Dict], state) -> List[Message]:
+        """
+        Create messages from all agents sharing their full state.
+        
+        Args:
+            observations: List of agent observations
+            state: Current world state
+            
+        Returns:
+            messages: List of messages (one per agent)
+        """
+        messages = []
+        for i, obs in enumerate(observations):
+            robot_state = obs['robot_state']
+            position = robot_state.position
+            
+            # Create coverage map from visited positions
+            local_map = torch.zeros(self.grid_size, self.grid_size)
+            for pos in robot_state.visited_positions:
+                local_map[pos[0], pos[1]] = 1.0
+            
+            msg = self.encode_message(i, local_map, position)
+            messages.append(msg)
+        
+        return messages
 
     def encode_message(self, agent_id: int, local_map: torch.Tensor,
                       position: Tuple[int, int]) -> Message:

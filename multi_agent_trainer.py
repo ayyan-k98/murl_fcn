@@ -107,14 +107,14 @@ class MultiAgentTrainer:
         if shared_replay:
             # Single shared buffer
             self.shared_memory = StratifiedReplayMemory(
-                capacity=config.REPLAY_CAPACITY
+                capacity=config.REPLAY_BUFFER_SIZE
             )
             self.agent_memories = [self.shared_memory] * num_agents
             print(f"✓ Using shared replay memory")
         else:
             # Separate buffers
             self.agent_memories = [
-                StratifiedReplayMemory(capacity=config.REPLAY_CAPACITY)
+                StratifiedReplayMemory(capacity=config.REPLAY_BUFFER_SIZE)
                 for _ in range(num_agents)
             ]
             print(f"✓ Using separate replay memories")
@@ -339,8 +339,8 @@ class MultiAgentTrainer:
         done = False
 
         while not done:
-            # Communication phase (if enabled)
-            messages = []
+            # Communication phase (only if enabled)
+            messages = None
             if comm_manager is not None:
                 # Collect agent states for communication
                 agent_states = []
@@ -355,9 +355,9 @@ class MultiAgentTrainer:
                 # Exchange messages
                 messages = comm_manager.communicate(observations, state)
             
-            # Compute agent occupancies (if using 6 channels)
+            # Compute agent occupancies (only if using 6 channels AND communication enabled)
             agent_occupancies = None
-            if occupancy_computer is not None and messages:
+            if occupancy_computer is not None and messages is not None:
                 agent_occupancies = [
                     occupancy_computer.compute(i, messages, step_count)
                     for i in range(self.num_agents)
@@ -374,9 +374,9 @@ class MultiAgentTrainer:
             next_state, rewards, done, info = env.step(actions)
             next_observations = env.get_observations()
 
-            # Compute next occupancies (if using 6 channels)
+            # Compute next occupancies (only if using 6 channels AND communication enabled)
             next_agent_occupancies = None
-            if occupancy_computer is not None and messages:
+            if occupancy_computer is not None and messages is not None:
                 # Update messages with new positions
                 next_agent_states = []
                 for i, obs in enumerate(next_observations):
@@ -388,7 +388,7 @@ class MultiAgentTrainer:
                     })
                 
                 # Recompute messages for next state
-                next_messages = comm_manager.communicate(next_observations, next_state) if comm_manager else messages
+                next_messages = comm_manager.communicate(next_observations, next_state)
                 
                 next_agent_occupancies = [
                     occupancy_computer.compute(i, next_messages, step_count + 1)
@@ -426,17 +426,14 @@ class MultiAgentTrainer:
             episode_agent_collisions += sum(info['agent_collisions'])
             
             # Update coordination metrics
+            # Use each agent's own coverage_history (not shared world_state coverage_map)
             agent_positions = [obs['robot_state'].position for obs in next_observations]
-            agent_coverages = [len(obs['robot_state'].visited_positions) for obs in next_observations]
-            num_messages = len(messages) if messages else 0
+            visited_maps = [np.array(obs['robot_state'].coverage_history > 0, dtype=bool) for obs in next_observations]
             coord_analyzer.update(
-                agent_positions=agent_positions,
-                agent_coverages=agent_coverages,
-                world_state=next_state,
-                num_agent_collisions=sum(info['agent_collisions']),
-                num_obstacle_collisions=sum(info['collisions']) - sum(info['agent_collisions']),
-                num_messages_sent=num_messages,
-                step=step_count
+                positions=agent_positions,
+                visited_maps=visited_maps,
+                actions=actions,
+                messages=messages
             )
 
             # Update for next step
@@ -445,7 +442,7 @@ class MultiAgentTrainer:
 
         # Episode metrics
         final_coverage = info['coverage_pct']
-        coord_metrics = coord_analyzer.finalize(step_count)
+        coord_metrics = coord_analyzer.get_metrics()
         coord_score_val = coordination_score(coord_metrics)
 
         episode_info = {
@@ -493,7 +490,7 @@ class MultiAgentTrainer:
             validation_results: Dict with validation metrics
         """
         if map_types is None:
-            map_types = ["empty", "random", "maze", "office", "warehouse"]
+            map_types = ["empty", "random", "room", "corridor", "cave"]
 
         # Store current epsilon
         original_epsilon = self.epsilon
@@ -528,14 +525,14 @@ class MultiAgentTrainer:
             done = False
 
             while not done:
-                # Communication phase (if enabled)
-                messages = []
+                # Communication phase (only if enabled)
+                messages = None
                 if comm_manager is not None:
                     messages = comm_manager.communicate(observations, state)
                 
-                # Compute agent occupancies (if using 6 channels)
+                # Compute agent occupancies (only if using 6 channels AND communication enabled)
                 agent_occupancies = None
-                if occupancy_computer is not None and messages:
+                if occupancy_computer is not None and messages is not None:
                     agent_occupancies = [
                         occupancy_computer.compute(i, messages, step_count)
                         for i in range(self.num_agents)
@@ -556,24 +553,21 @@ class MultiAgentTrainer:
                 episode_agent_collisions += sum(info['agent_collisions'])
                 
                 # Update coordination metrics
+                # Use each agent's own coverage_history (not shared world_state coverage_map)
                 agent_positions = [obs['robot_state'].position for obs in next_observations]
-                agent_coverages = [len(obs['robot_state'].visited_positions) for obs in next_observations]
-                num_messages = len(messages) if messages else 0
+                visited_maps = [np.array(obs['robot_state'].coverage_history > 0, dtype=bool) for obs in next_observations]
                 coord_analyzer.update(
-                    agent_positions=agent_positions,
-                    agent_coverages=agent_coverages,
-                    world_state=next_state,
-                    num_agent_collisions=sum(info['agent_collisions']),
-                    num_obstacle_collisions=sum(info['collisions']) - sum(info['agent_collisions']),
-                    num_messages_sent=num_messages,
-                    step=step_count
+                    positions=agent_positions,
+                    visited_maps=visited_maps,
+                    actions=actions,
+                    messages=messages
                 )
                 
                 step_count += 1
                 observations = next_observations
 
             final_coverage = info['coverage_pct']
-            coord_metrics = coord_analyzer.finalize(step_count)
+            coord_metrics = coord_analyzer.get_metrics()
             coord_score_val = coordination_score(coord_metrics)
 
             # Record results

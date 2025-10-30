@@ -377,8 +377,8 @@ def main():
     parser.add_argument(
         '--test-maps',
         type=str,
-        default='empty,random,maze',
-        help='Comma-separated map types to test'
+        default='empty,random,room',
+        help='Comma-separated map types to test (empty, random, room, corridor, cave, lshape)'
     )
 
     parser.add_argument(

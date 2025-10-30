@@ -22,6 +22,7 @@ class RobotState:
     last_action: int = 8  # STAY
     coverage_history: np.ndarray = None
     visit_heat: np.ndarray = None
+    coverage_over_time: List[float] = field(default_factory=list)  # Track coverage progression
 
     def __post_init__(self):
         if self.coverage_history is None:
@@ -40,6 +41,7 @@ class RobotState:
         self.coverage_history.fill(0.0)
         self.visit_heat.fill(0.0)
         self.last_action = 8
+        self.coverage_over_time = []
 
 
 @dataclass
