@@ -44,7 +44,7 @@ class MultiAgentTrainer:
         coordination: CoordinationStrategy = CoordinationStrategy.INDEPENDENT,
         parameter_sharing: bool = True,
         shared_replay: bool = True,
-        input_channels: int = 5,
+        input_channels: int = 6,  # FIXED: Default to 6 (adds agent occupancy channel)
         learning_rate: float = None,
         gamma: float = None,
         device: str = None

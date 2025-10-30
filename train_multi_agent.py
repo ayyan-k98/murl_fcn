@@ -118,7 +118,7 @@ def train_multi_agent(
     parameter_sharing: bool = True,
     shared_replay: bool = True,
     use_curriculum: bool = True,
-    use_6ch: bool = False,
+    use_6ch: bool = True,  # FIXED: Enable 6th channel (agent occupancy) by default
     comm_protocol: str = 'none',
     experiment_name: Optional[str] = None,
     resume_from: Optional[str] = None

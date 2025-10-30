@@ -141,8 +141,10 @@ class Config:
     #   r=3.0: P_cov=0.165 (6 steps to cover - very challenging!)
     #   r=4.0: P_cov=0.055 (16 steps - nearly impossible!)
     #
-    PROBABILISTIC_COVERAGE_STEEPNESS: float = 1.8   # 🚨 INCREASED from 1.5 (steeper falloff)
-    PROBABILISTIC_COVERAGE_MIDPOINT: float = 2.0    # 🚨 REDUCED from 2.5 (closer in)
+    # FIXED: Recalibrated for SENSOR_RANGE = 8.5 (for 40×40 grid)
+    # r_eff = 0.75 * 8.5 = 6.375, k = 5.888 / 6.375 = 0.923, r0 = 6.375 / 2 = 3.19
+    PROBABILISTIC_COVERAGE_STEEPNESS: float = 0.92  # FIXED: Scaled for larger sensor range (was 1.8)
+    PROBABILISTIC_COVERAGE_MIDPOINT: float = 3.2    # FIXED: Scaled for larger sensor range (was 2.0)
 
     # ==================== Multi-Agent Reward Normalization ====================
     # CRITICAL: Normalize rewards for QMIX to prevent gradient explosion

@@ -608,9 +608,91 @@ class MultiAgentCoverageEnv:
     def _calculate_total_coverage_gain(self, prev_coverage_map: np.ndarray) -> int:
         """Calculate total newly covered cells (team metric)."""
         current_coverage = self.state.world_state.coverage_map
-        newly_covered = np.sum((current_coverage >= config.COVERAGE_THRESHOLD) & 
+        newly_covered = np.sum((current_coverage >= config.COVERAGE_THRESHOLD) &
                               (prev_coverage_map < config.COVERAGE_THRESHOLD))
         return int(newly_covered)
+
+    def _count_overlapping_cells(self, agent_id: int) -> int:
+        """
+        Count cells this agent has visited that other agents have also visited.
+
+        Args:
+            agent_id: ID of the agent to check
+
+        Returns:
+            Number of overlapping cells
+        """
+        from multi_agent_config import ma_config
+
+        if not ma_config.USE_OVERLAP_PENALTY:
+            return 0
+
+        agent = self.state.agents[agent_id]
+        agent_visits = agent.robot_state.coverage_history >= config.COVERAGE_THRESHOLD
+
+        overlap_count = 0
+        for other in self.state.agents:
+            if other.agent_id != agent_id:
+                other_visits = other.robot_state.coverage_history >= config.COVERAGE_THRESHOLD
+                overlap = np.logical_and(agent_visits, other_visits)
+                overlap_count += np.sum(overlap)
+
+        return int(overlap_count)
+
+    def _get_min_distance_to_other_agents(self, agent_id: int) -> float:
+        """
+        Get minimum Manhattan distance to nearest other agent.
+
+        Args:
+            agent_id: ID of the agent
+
+        Returns:
+            Minimum distance to nearest agent (in grid cells)
+        """
+        from multi_agent_config import ma_config
+
+        if not ma_config.USE_DIVERSITY_BONUS:
+            return 0.0
+
+        agent = self.state.agents[agent_id]
+        pos = agent.robot_state.position
+
+        min_dist = float('inf')
+        for other in self.state.agents:
+            if other.agent_id != agent_id:
+                other_pos = other.robot_state.position
+                dist = abs(pos[0] - other_pos[0]) + abs(pos[1] - other_pos[1])
+                min_dist = min(min_dist, dist)
+
+        return min_dist if min_dist != float('inf') else 0.0
+
+    def _get_agent_efficiency(self, agent_id: int) -> float:
+        """
+        Calculate agent's exploration efficiency (unique_cells / total_visits).
+
+        Args:
+            agent_id: ID of the agent
+
+        Returns:
+            Efficiency ratio in [0, 1]
+        """
+        from multi_agent_config import ma_config
+
+        if not ma_config.USE_EFFICIENCY_BONUS:
+            return 0.0
+
+        agent = self.state.agents[agent_id]
+
+        # Count unique cells visited
+        unique_cells = np.sum(agent.robot_state.coverage_history >= config.COVERAGE_THRESHOLD)
+
+        # Count total visits
+        total_visits = np.sum(agent.robot_state.visit_heat)
+
+        if total_visits == 0:
+            return 0.0
+
+        return unique_cells / total_visits
 
     def _compute_rotation_penalty(self, agent_id: int, current_action: int) -> float:
         """
@@ -660,8 +742,12 @@ class MultiAgentCoverageEnv:
         knowledge_gain: int,
         collision: bool
     ) -> float:
-        """Calculate individual agent reward."""
+        """Calculate individual agent reward with coordination components."""
+        from multi_agent_config import ma_config
+
         reward = 0.0
+
+        # === INDIVIDUAL REWARDS ===
 
         # Coverage reward (scale for probabilistic mode)
         coverage_reward_scale = config.COVERAGE_REWARD
@@ -671,8 +757,8 @@ class MultiAgentCoverageEnv:
 
         # Exploration reward
         reward += knowledge_gain * config.EXPLORATION_REWARD
-        
-        # Rotation penalty (NEW: encourages smooth paths)
+
+        # Rotation penalty (encourages smooth paths)
         rotation_penalty = self._compute_rotation_penalty(agent.agent_id, action)
         reward += rotation_penalty
 
@@ -686,6 +772,26 @@ class MultiAgentCoverageEnv:
         # Stay penalty
         if action == 8:
             reward += config.STAY_PENALTY
+
+        # === COORDINATION REWARDS (NEW!) ===
+
+        # Overlap penalty: Discourage redundant coverage
+        if ma_config.USE_OVERLAP_PENALTY:
+            overlap_count = self._count_overlapping_cells(agent.agent_id)
+            overlap_penalty = overlap_count * ma_config.OVERLAP_PENALTY_SCALE
+            reward -= overlap_penalty
+
+        # Diversity bonus: Encourage spatial separation
+        if ma_config.USE_DIVERSITY_BONUS:
+            min_distance = self._get_min_distance_to_other_agents(agent.agent_id)
+            # Normalize to [0, 1]: max useful distance is 10 cells
+            diversity = min(min_distance / 10.0, 1.0)
+            reward += diversity * ma_config.DIVERSITY_BONUS_SCALE
+
+        # Efficiency bonus: Reward high unique_coverage / total_visits ratio
+        if ma_config.USE_EFFICIENCY_BONUS:
+            efficiency = self._get_agent_efficiency(agent.agent_id)
+            reward += efficiency * ma_config.EFFICIENCY_BONUS_SCALE
 
         return reward
 

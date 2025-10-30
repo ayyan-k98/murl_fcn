@@ -20,13 +20,18 @@ class MultiAgentConfig:
     NUM_AGENTS = 4
 
     # Grid size (can be different from single-agent training)
-    GRID_SIZE = 20
+    # FIXED: Changed from 20 to 40 (matches actual training observed in logs)
+    GRID_SIZE = 40
 
     # Sensor range (POMDP)
-    SENSOR_RANGE = 3.0
+    # FIXED: Scaled from 5.0 for 20×20 to 8.5 for 40×40
+    # Formula: 5.0 × (40/20)^0.4 = 5.0 × 1.74 = 8.7 ≈ 8.5
+    SENSOR_RANGE = 8.5
 
     # Communication range between agents
-    COMMUNICATION_RANGE = 5.0
+    # FIXED: Increased to cover 3σ position uncertainty (99.7% confidence)
+    # σ(t=5) = 0.5 + 1.0*5 = 5.5, 3σ = 16.5, using 15.0 for practical range
+    COMMUNICATION_RANGE = 15.0
     
     # Communication frequency (every N steps)
     # 1 = every step (high overhead but perfect info)
@@ -64,7 +69,9 @@ class MultiAgentConfig:
     # Parameter sharing
     # True: All agents share the same network (faster, less memory)
     # False: Each agent has independent network (more flexible)
-    PARAMETER_SHARING = True
+    # FIXED: Changed to False - independent networks needed for POMDP with different viewpoints
+    # Agents see different local observations and need specialization for coordination
+    PARAMETER_SHARING = False
 
     # Shared replay memory
     # True: Single replay buffer for all agents
@@ -72,7 +79,8 @@ class MultiAgentConfig:
     SHARED_REPLAY = True
 
     # Training episodes
-    TOTAL_EPISODES = 1000
+    # FIXED: Reduced from 1000 to 800 (matches new curriculum final phase)
+    TOTAL_EPISODES = 800
 
     # Validation frequency
     VALIDATION_FREQ = 50
@@ -88,80 +96,62 @@ class MultiAgentConfig:
     # ============================================================================
 
     # Multi-agent curriculum phases
-    # Progressive training: start simple, increase complexity
+    # FIXED: Start with 4 agents from beginning, add corridors progressively, reduce total episodes to 800
+    # Focus: Target team size (4 agents) from start, vary map complexity not team size
 
     CURRICULUM_PHASES = [
         {
-            'name': 'Phase 1: Team Formation (2 agents, empty)',
+            'name': 'Phase 1: Formation (4 agents, empty maps, independent)',
             'start_ep': 0,
-            'end_ep': 150,
-            'num_agents': 2,
-            'map_distribution': {'empty': 1.0},
+            'end_ep': 200,
+            'num_agents': 4,  # Start with target team size
+            'map_distribution': {'empty': 0.8, 'random': 0.2},
             'coordination': CoordinationStrategy.INDEPENDENT,
             'expected_coverage': 0.75,
             'epsilon_floor': 0.1,
-            'epsilon_decay': 0.98
+            'epsilon_decay': 0.98,
+            'description': 'Learn basic multi-agent coverage on simple maps'
         },
         {
-            'name': 'Phase 2: Simple Coordination (2 agents, mixed)',
-            'start_ep': 150,
-            'end_ep': 300,
-            'num_agents': 2,
-            'map_distribution': {'empty': 0.6, 'random': 0.4},
-            'coordination': CoordinationStrategy.INDEPENDENT,
-            'expected_coverage': 0.80,
-            'epsilon_floor': 0.1,
-            'epsilon_decay': 0.98
-        },
-        {
-            'name': 'Phase 3: Scale to 4 agents (empty)',
-            'start_ep': 300,
-            'end_ep': 450,
+            'name': 'Phase 2: Obstacles (4 agents, sparse obstacles, hierarchical)',
+            'start_ep': 200,
+            'end_ep': 400,
             'num_agents': 4,
-            'map_distribution': {'empty': 0.7, 'random': 0.3},
-            'coordination': CoordinationStrategy.INDEPENDENT,
-            'expected_coverage': 0.82,
+            'map_distribution': {'empty': 0.5, 'random': 0.4, 'corridor': 0.1},  # Introduce corridors early!
+            'coordination': CoordinationStrategy.HIERARCHICAL,  # Start coordination learning
+            'expected_coverage': 0.78,
             'epsilon_floor': 0.08,
-            'epsilon_decay': 0.98
+            'epsilon_decay': 0.98,
+            'description': 'Learn coordination with sparse obstacles, introduce corridors'
         },
         {
-            'name': 'Phase 4: Hierarchical Coordination (4 agents)',
-            'start_ep': 450,
+            'name': 'Phase 3: Complex (4 agents, mixed maps, hierarchical)',
+            'start_ep': 400,
             'end_ep': 600,
             'num_agents': 4,
-            'map_distribution': {'empty': 0.5, 'random': 0.3, 'maze': 0.2},
+            'map_distribution': {'empty': 0.3, 'random': 0.3, 'corridor': 0.2, 'maze': 0.2},  # More corridors
             'coordination': CoordinationStrategy.HIERARCHICAL,
-            'expected_coverage': 0.85,
-            'epsilon_floor': 0.08,
-            'epsilon_decay': 0.98
-        },
-        {
-            'name': 'Phase 5: Advanced Coordination (4 agents)',
-            'start_ep': 600,
-            'end_ep': 750,
-            'num_agents': 4,
-            'map_distribution': {'empty': 0.4, 'random': 0.3, 'maze': 0.3},
-            'coordination': CoordinationStrategy.HIERARCHICAL,
-            'expected_coverage': 0.87,
+            'expected_coverage': 0.82,
             'epsilon_floor': 0.05,
-            'epsilon_decay': 0.98
+            'epsilon_decay': 0.98,
+            'description': 'Advanced coordination with complex maps and bottlenecks'
         },
         {
-            'name': 'Phase 6: Final Challenge (4 agents, all maps)',
-            'start_ep': 750,
-            'end_ep': 1000,
+            'name': 'Phase 4: Final Challenge (4 agents, all maps, hierarchical)',
+            'start_ep': 600,
+            'end_ep': 800,  # Reduced from 1000
             'num_agents': 4,
             'map_distribution': {
                 'empty': 0.2,
-                'random': 0.25,
-                'maze': 0.25,
-                'office': 0.15,
-                'warehouse': 0.15
+                'random': 0.3,
+                'corridor': 0.3,  # Heavy corridor emphasis
+                'maze': 0.2
             },
             'coordination': CoordinationStrategy.HIERARCHICAL,
-            'expected_coverage': 0.90,
+            'expected_coverage': 0.85,
             'epsilon_floor': 0.05,
-            'epsilon_decay': 0.98
+            'epsilon_decay': 0.98,
+            'description': 'Final training with corridor-heavy distribution to match validation'
         }
     ]
 
