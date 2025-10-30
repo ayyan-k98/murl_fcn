@@ -171,16 +171,12 @@ def validate_qmix(
                 
                 # Update coordination metrics
                 agent_positions = [obs['robot_state'].position for obs in next_observations]
-                agent_coverages = [len(obs['robot_state'].visited_positions) for obs in next_observations]
-                num_messages = len(messages) if messages else 0
+                visited_maps = [np.array(obs['world_state'].coverage_map > 0, dtype=bool) for obs in next_observations]
                 coord_analyzer.update(
-                    agent_positions=agent_positions,
-                    agent_coverages=agent_coverages,
-                    world_state=state,
-                    num_agent_collisions=sum(info['agent_collisions']),
-                    num_obstacle_collisions=sum(info['collisions']) - sum(info['agent_collisions']),
-                    num_messages_sent=num_messages,
-                    step=step_count
+                    positions=agent_positions,
+                    visited_maps=visited_maps,
+                    actions=actions,
+                    messages=messages
                 )
                 
                 observations = next_observations
@@ -188,7 +184,7 @@ def validate_qmix(
 
             # Record metrics
             final_coverage = info['coverage_pct']
-            coord_metrics = coord_analyzer.finalize(step_count)
+            coord_metrics = coord_analyzer.get_metrics()
             coord_score_val = coordination_score(coord_metrics)
             
             map_coverages.append(final_coverage)
@@ -514,16 +510,12 @@ def train_qmix(
             
             # Update coordination metrics
             agent_positions = [obs['robot_state'].position for obs in next_observations]
-            agent_coverages = [len(obs['robot_state'].visited_positions) for obs in next_observations]
-            num_messages = len(messages) if messages else 0
+            visited_maps = [np.array(obs['world_state'].coverage_map > 0, dtype=bool) for obs in next_observations]
             coord_analyzer.update(
-                agent_positions=agent_positions,
-                agent_coverages=agent_coverages,
-                world_state=next_state,
-                num_agent_collisions=sum(info['agent_collisions']),
-                num_obstacle_collisions=sum(info['collisions']) - sum(info['agent_collisions']),
-                num_messages_sent=num_messages,
-                step=episode_length
+                positions=agent_positions,
+                visited_maps=visited_maps,
+                actions=actions,
+                messages=messages
             )
 
             # Update for next step
@@ -534,7 +526,7 @@ def train_qmix(
         # Episode metrics
         final_coverage = info['coverage_pct']
         mean_loss = np.mean(episode_losses) if episode_losses else None
-        coord_metrics = coord_analyzer.finalize(episode_length)
+        coord_metrics = coord_analyzer.get_metrics()
         coord_score_val = coordination_score(coord_metrics)
 
         episode_metrics = {

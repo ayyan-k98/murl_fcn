@@ -59,6 +59,22 @@ class CoverageEnvironment:
 
         # Previous coverage for reward calculation
         self.prev_sensed_cells = set()
+        
+        # Track last action for rotation penalty
+        self.last_action = None
+        
+        # Action angle mapping (in degrees, 0° = North)
+        self.action_angles = {
+            0: 0,    # N
+            1: 45,   # NE
+            2: 90,   # E
+            3: 135,  # SE
+            4: 180,  # S
+            5: 225,  # SW
+            6: 270,  # W
+            7: 315,  # NW
+            8: None  # STAY (no direction)
+        }
 
     def reset(self, map_type: str = None) -> RobotState:
         """
@@ -98,6 +114,9 @@ class CoverageEnvironment:
         # Reset tracking
         self.steps = 0
         self.prev_sensed_cells = set()
+        
+        # Reset last action for rotation penalty
+        self.last_action = None
 
         # Perform initial sensing
         self._update_robot_sensing()
@@ -129,12 +148,19 @@ class CoverageEnvironment:
         # Update sensing (POMDP)
         self._update_robot_sensing()
 
+        # Track coverage over time for visualization
+        current_coverage_pct = self._get_coverage_percentage() / 100.0
+        self.robot_state.coverage_over_time.append(current_coverage_pct)
+
         # Calculate coverage gain and knowledge gain
         coverage_gain = self._calculate_coverage_gain(prev_coverage)
         knowledge_gain = len(self.robot_state.local_map) - prev_local_map_size
 
         # Calculate reward
         reward = self._calculate_reward(action, coverage_gain, knowledge_gain, collision)
+
+        # Update last action for rotation penalty tracking
+        self.last_action = action
 
         # Check termination
         done = self._check_done()
@@ -302,27 +328,83 @@ class CoverageEnvironment:
 
         return sensed
 
-    def _calculate_coverage_gain(self, prev_coverage: np.ndarray) -> int:
-        """Calculate number of newly covered cells."""
+    def _calculate_coverage_gain(self, prev_coverage: np.ndarray) -> float:
+        """
+        Calculate coverage gain (supports both binary and probabilistic).
+        
+        Returns:
+            For binary: Number of newly covered cells (integer)
+            For probabilistic: Sum of coverage increases (float)
+        """
         current_coverage = self.world_state.coverage_map
-        newly_covered = np.sum((current_coverage > 0.5) & (prev_coverage < 0.5))
-        return int(newly_covered)
+        
+        if config.USE_PROBABILISTIC_ENV:
+            # Probabilistic: sum of all coverage increases
+            coverage_diff = current_coverage - prev_coverage
+            coverage_gain = np.sum(np.maximum(coverage_diff, 0))  # Only positive gains
+            return float(coverage_gain)
+        else:
+            # Binary: count newly covered cells (>0.5 threshold)
+            newly_covered = np.sum((current_coverage > 0.5) & (prev_coverage < 0.5))
+            return float(newly_covered)
+
+    def _compute_rotation_penalty(self, current_action: int) -> float:
+        """
+        Compute penalty based on direction change between actions.
+        
+        Encourages smooth trajectories by penalizing sharp turns.
+        
+        Args:
+            current_action: Current action [0-8]
+        
+        Returns:
+            Negative reward proportional to rotation angle (0 to -0.15)
+        """
+        if not config.USE_ROTATION_PENALTY:
+            return 0.0
+        
+        # No penalty on first move or after STAY
+        if self.last_action is None or self.last_action == 8:
+            return 0.0
+        
+        # STAY action has no rotation
+        if current_action == 8:
+            return 0.0
+        
+        # Get angles for both actions
+        last_angle = self.action_angles[self.last_action]
+        current_angle = self.action_angles[current_action]
+        
+        # Calculate minimum rotation (accounting for 360° wrap-around)
+        angle_diff = abs(current_angle - last_angle)
+        angle_diff = min(angle_diff, 360 - angle_diff)
+        
+        # Apply graduated penalties based on rotation magnitude
+        if angle_diff == 0:
+            return 0.0  # No rotation
+        elif angle_diff <= 45:
+            return config.ROTATION_PENALTY_SMALL   # -0.05
+        elif angle_diff <= 90:
+            return config.ROTATION_PENALTY_MEDIUM  # -0.10
+        else:  # 135° or 180°
+            return config.ROTATION_PENALTY_LARGE   # -0.15
 
     def _calculate_reward(self,
                          action: int,
-                         coverage_gain: int,
+                         coverage_gain: float,
                          knowledge_gain: int,
                          collision: bool) -> float:
         """
         Calculate reward for current step.
 
         Reward components:
-            - Coverage gain: +10 per cell
-            - Exploration: +0.5 per new sensed cell
-            - Frontier bonus: +0.05 per frontier cell (capped)
-            - Collision: -2.0
-            - Step penalty: -0.01
-            - Stay penalty: -0.1 (if action = STAY)
+            - Coverage gain: +1.2 per cell
+            - Exploration: +0.07 per new sensed cell
+            - Frontier bonus: +0.012 per frontier cell (capped at 0.25)
+            - Rotation penalty: -0.05 to -0.15 based on turn angle
+            - Collision: -0.25
+            - Step penalty: -0.0012
+            - Stay penalty: -0.012 (if action = STAY)
         """
         reward = 0.0
 
@@ -336,6 +418,10 @@ class CoverageEnvironment:
         frontier_cells = self._count_frontier_cells()
         frontier_bonus = min(frontier_cells * config.FRONTIER_BONUS, config.FRONTIER_CAP)
         reward += frontier_bonus
+
+        # Rotation penalty (NEW: encourages smooth paths)
+        rotation_penalty = self._compute_rotation_penalty(action)
+        reward += rotation_penalty
 
         # Collision penalty
         if collision:
@@ -383,12 +469,12 @@ class CoverageEnvironment:
         return False
 
     def _get_coverage_percentage(self) -> float:
-        """Calculate coverage percentage."""
+        """Calculate coverage percentage using threshold from config."""
         total_free_cells = self.grid_size * self.grid_size - len(self.world_state.obstacles)
         if total_free_cells == 0:
             return 0.0
 
-        covered_cells = np.sum(self.world_state.coverage_map > 0.5)
+        covered_cells = np.sum(self.world_state.coverage_map >= config.COVERAGE_THRESHOLD)
         return covered_cells / total_free_cells
 
     def get_state(self) -> RobotState:

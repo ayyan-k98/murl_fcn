@@ -14,12 +14,21 @@ class Config:
 
     # ==================== Environment ====================
     GRID_SIZE: int = 20
-    SENSOR_RANGE: float = 5.0  # POMDP: Limited observation radius
+    SENSOR_RANGE: float = 4.0  # 🚨 REDUCED from 5.0 - Make task harder
     COMM_RANGE: float = 10.0    # For Stage 2 multi-agent
-    NUM_RAYS: int = 8          # REDUCED from 12 for speed (33% faster raycast)
-    SAMPLES_PER_RAY: int = 6   # REDUCED from 8 for speed (25% fewer samples)
-    MAX_EPISODE_STEPS: int = 350  # REDUCED from 350 for faster training (43% speedup)
+    NUM_RAYS: int = 12          # 🚨 REDUCED from 16 - Less coverage per step
+    SAMPLES_PER_RAY: int = 8    # 🚨 REDUCED from 10 - Coarser sampling
+    MAX_EPISODE_STEPS: int = 350
     USE_PROBABILISTIC_ENV: bool = False  # Toggle between binary and probabilistic coverage
+    
+    # ==================== Multi-Agent Early Termination ====================
+    # Early termination for multi-agent ONLY (single-agent trains full episodes)
+    # Encourages agents to learn efficient coordination patterns
+    ENABLE_EARLY_TERMINATION_MULTI: bool = True          # Enable early termination
+    EARLY_TERM_COVERAGE_TARGET_MULTI: float = 0.90       # Terminate when 90% coverage reached
+    EARLY_TERM_MIN_STEPS_MULTI: int = 150                # Don't terminate before 150 steps
+    EARLY_TERM_COMPLETION_BONUS: float = 10.0            # Flat bonus for completing early
+    EARLY_TERM_TIME_BONUS_PER_STEP: float = 0.05         # Additional bonus per step saved
 
     # ==================== Agent ====================
     N_ACTIONS: int = 9  # 8 directions + stay
@@ -38,17 +47,17 @@ class Config:
         (0, 0)     # STAY
     ]
 
-    # ==================== Learning (FCN-OPTIMIZED) ====================
-    LEARNING_RATE: float = 3e-4       # FCN-optimized: Lower than GAT (more stable with CNN)
-    LEARNING_RATE_MIN: float = 5e-5   # Minimum LR for decay
-    LR_DECAY_RATE: float = 0.9995     # Slow decay (reach min LR at ~6000 episodes)
+    # ==================== Learning (FCN + PROBABILISTIC OPTIMIZED) ====================
+    LEARNING_RATE: float = 5e-5        # 🚨 EMERGENCY: Reduced from 1e-4 (2× reduction for stability)
+    LEARNING_RATE_MIN: float = 1e-5    # REDUCED from 5e-5
+    LR_DECAY_RATE: float = 0.9998      # Slower decay from 0.9995
     GAMMA: float = 0.99               # Discount factor
     BATCH_SIZE: int = 256             # Large batch for stable gradients
     REPLAY_BUFFER_SIZE: int = 50000   # 50k transitions (~200 episodes worth)
-    TARGET_UPDATE_FREQ: int = 100     # Update target network every 100 episodes
+    TARGET_UPDATE_FREQ: int = 50      # 🚨 INCREASED from 100 - More frequent for stability
     MIN_REPLAY_SIZE: int = 200        # Start training after 200 transitions (~1 episode)
     TRAIN_FREQ: int = 4               # Train every 4 steps (balance speed vs sample efficiency)
-    GRAD_CLIP_NORM: float = 10.0      # Gradient clipping (FCN more stable than GAT)
+    GRAD_CLIP_NORM: float = 3.0       # 🚨 EMERGENCY: Reduced from 5.0 - Aggressive clipping
     
     # N-step returns for better credit assignment
     N_STEP: int = 3                   # NEW: Use 3-step returns
@@ -85,25 +94,55 @@ class Config:
     USE_COORDCONV: bool = True      # Add coordinate channels (x, y) to input
     SPATIAL_SOFTMAX_TEMP: float = 1.0  # Temperature for spatial softmax attention
 
-    # ==================== Rewards (RESTORED ORIGINAL SCALE) ====================
-    # CRITICAL: Restore full rewards - 20x reduction was too aggressive
-    # Agent needs strong signal to learn spatial navigation
-    COVERAGE_REWARD: float = 15.0      # INCREASED from 10.0 - Stronger learning signal
-    EXPLORATION_REWARD: float = 1.0    # INCREASED from 0.5
-    FRONTIER_BONUS: float = 0.1        # INCREASED from 0.05
-    FRONTIER_CAP: float = 2.0          # INCREASED from 1.5
-    COLLISION_PENALTY: float = -2.0    # RESTORED from -0.1
-    STEP_PENALTY: float = -0.01        # RESTORED from -0.0005
-    STAY_PENALTY: float = -0.1         # RESTORED from -0.005
+    # ==================== Rewards (EMERGENCY RESCALING - GRADIENT EXPLOSION FIX) ====================
+    # 🚨 CRITICAL: Gradient norm rising: 18→36 (Q-values still accumulating)
+    # Additional reduction needed + sensor tuning to make task appropriately challenging
+    # 
+    # Episode 300: Coverage 95.6%, Gradient 36.7 (exceeding threshold 25.0)
+    # → Q-values still too large, need further reward reduction
+    #
+    # SOLUTION: Additional 40% reward reduction (total 4× from original)
+    # Expected episode reward after fix: 750 × 0.6 = ~450 (more conservative)
+    
+    COVERAGE_REWARD: float = 1.2       # 🚨 FURTHER REDUCED from 2.0 (40% reduction)
+    COVERAGE_THRESHOLD: float = 0.85   # 🚨 INCREASED from 0.5 - Cell must reach 85% to count as "covered"
+    
+    EXPLORATION_REWARD: float = 0.07   # 🚨 Reduced from 0.12 (40% reduction)
+    FRONTIER_BONUS: float = 0.012      # 🚨 Reduced from 0.02 (40% reduction)
+    FRONTIER_CAP: float = 0.25         # 🚨 Reduced from 0.4 (40% reduction)
+    
+    # NEW: Rotation penalties for smoother trajectories
+    ROTATION_PENALTY_SMALL: float = -0.05   # 45° turn (adjacent action)
+    ROTATION_PENALTY_MEDIUM: float = -0.10  # 90° turn
+    ROTATION_PENALTY_LARGE: float = -0.15   # 135°-180° turn
+    USE_ROTATION_PENALTY: bool = True       # Toggle rotation penalty
+    
+    COLLISION_PENALTY: float = -0.25   # 🚨 Reduced from -0.4 (40% reduction)
+    STEP_PENALTY: float = -0.0012      # 🚨 Reduced from -0.002 (40% reduction)
+    STAY_PENALTY: float = -0.012       # 🚨 Reduced from -0.02 (40% reduction)
     
     # Probabilistic environment parameters
-    PROBABILISTIC_REWARD_SCALE: float = 0.15  # Reward scaling for probabilistic mode
+    PROBABILISTIC_REWARD_SCALE: float = 1.0  # No extra scaling needed
     
     # Distance-based coverage sensor model (Equation 4 from paper)
     # P_cov(cell | robot) = 1 / (1 + e^(k*(r - r0)))
     # where r is euclidean distance, r0 is midpoint, k is steepness
-    PROBABILISTIC_COVERAGE_MIDPOINT: float = 1.5   # r0: distance where P_cov = 0.5
-    PROBABILISTIC_COVERAGE_STEEPNESS: float = 2.0  # k: sigmoid steepness (higher = sharper falloff)
+    #
+    # TUNED PARAMETERS (adjusted for SENSOR_RANGE=4.0):
+    # For 20×20 grid with SENSOR_RANGE=4.0 (reduced from 5.0):
+    #   Steeper falloff for more challenging coverage task
+    #   r0 = 2.0 (midpoint closer in)
+    #   k = 1.8 (steeper for harder task)
+    #
+    # Coverage profile (with COVERAGE_THRESHOLD=0.85):
+    #   r=0.0: P_cov=0.943 (robot position - 1 step to cover)
+    #   r=1.0: P_cov=0.762 (2 steps to cover)
+    #   r=2.0: P_cov=0.500 (2 steps to cover)
+    #   r=3.0: P_cov=0.165 (6 steps to cover - very challenging!)
+    #   r=4.0: P_cov=0.055 (16 steps - nearly impossible!)
+    #
+    PROBABILISTIC_COVERAGE_STEEPNESS: float = 1.8   # 🚨 INCREASED from 1.5 (steeper falloff)
+    PROBABILISTIC_COVERAGE_MIDPOINT: float = 2.0    # 🚨 REDUCED from 2.5 (closer in)
 
     # ==================== Multi-Agent Reward Normalization ====================
     # CRITICAL: Normalize rewards for QMIX to prevent gradient explosion
@@ -115,9 +154,9 @@ class Config:
     MULTI_AGENT_REWARD_NORMALIZE_BY_N: bool = True
     
     # Scale factor: Map rewards to manageable range
-    # Typical per-step reward: 0-20 → After scaling: 0-2
-    # This keeps Q-values in range [0, ~50] instead of [0, 60,000]
-    MULTI_AGENT_REWARD_SCALE_FACTOR: float = 10.0
+    # REDUCED from 10.0 to 1.0 to avoid over-scaling with probabilistic mode
+    # With probabilistic (0.15x) + normalize_by_n (÷4) + scale (÷1.0) = 0.0375x
+    MULTI_AGENT_REWARD_SCALE_FACTOR: float = 1.0  # Changed from 10.0
     
     # Optional clipping (disabled by default - scaling is sufficient)
     MULTI_AGENT_REWARD_CLIP_MIN: float = None  # Set to -1.0 for hard clipping
@@ -128,18 +167,20 @@ class Config:
     MULTI_AGENT_USE_VALUE_RESCALING: bool = False
     MULTI_AGENT_VALUE_RESCALE_EPS: float = 0.001
 
-    # ==================== Gradient Stability ====================
-    GRAD_CLIP_THRESHOLD: float = 1.0   # Keep tight (working well)
+    # ==================== Gradient Stability (EMERGENCY TIGHTENING) ====================
+    # 🚨 CRITICAL: Current gradient norm = 54.1 (exploding!)
+    # Need aggressive clipping to prevent catastrophic failure in ~100 episodes
+    GRAD_CLIP_THRESHOLD: float = 0.2   # 🚨 EMERGENCY: Reduced from 0.3 - Ultra-tight clipping
     AGC_CLIP_RATIO: float = 0.01       # Keep strong AGC (working well)
     AGC_EPS: float = 1e-3
-    EXPLOSION_THRESHOLD: float = 500.0
-    MAX_GRAD_NORM: float = 200.0
+    EXPLOSION_THRESHOLD: float = 25.0  # 🚨 EMERGENCY: Reduced from 50.0 - Detect immediately
+    MAX_GRAD_NORM: float = 20.0        # 🚨 EMERGENCY: Reduced from 30.0 - Hard limit
 
     # ==================== Training ====================
-    STAGE1_EPISODES: int = 2000  # EXTENDED from 1600 for better generalization & 92% success confidence
+    STAGE1_EPISODES: int = 1500  # 🔄 1200 curriculum + 300 consolidation
     VALIDATION_INTERVAL: int = 100  # INCREASED from 50 to reduce overhead (validate less frequently)
     VALIDATION_EPISODES: int = 8    # REDUCED from 10 for faster validation
-    CHECKPOINT_INTERVAL: int = 200   # INCREASED from 100 to reduce I/O overhead
+    CHECKPOINT_INTERVAL: int = 100   # 🔄 REDUCED from 200 - More frequent checkpoints
     
     # ==================== Performance Optimizations ====================
     # Reduce per-episode overhead for faster training

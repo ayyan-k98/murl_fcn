@@ -109,7 +109,7 @@ class MultiAgentCoverageEnv:
         communication_range: float = 5.0,
         coordination: CoordinationStrategy = CoordinationStrategy.INDEPENDENT,
         map_type: str = "empty",
-        collision_penalty: float = -5.0,
+        collision_penalty: float = None,
         team_reward_weight: float = 0.5
     ):
         """
@@ -134,7 +134,7 @@ class MultiAgentCoverageEnv:
         self.communication_range = communication_range
         self.coordination = coordination
         self.map_type = map_type
-        self.collision_penalty = collision_penalty
+        self.collision_penalty = collision_penalty if collision_penalty is not None else config.COLLISION_PENALTY
         self.team_reward_weight = team_reward_weight
 
         # Create base single-agent environments for reusing logic
@@ -154,6 +154,22 @@ class MultiAgentCoverageEnv:
         self.voronoi_regions: Optional[Dict[int, Set[Tuple[int, int]]]] = None
         self.market_bids: Optional[Dict[int, Dict[Tuple[int, int], float]]] = None
         self.leader_id: Optional[int] = None
+        
+        # Track last actions for rotation penalty (per agent)
+        self.last_actions: List[Optional[int]] = [None] * num_agents
+        
+        # Action angle mapping (in degrees, 0° = North)
+        self.action_angles = {
+            0: 0,    # N
+            1: 45,   # NE
+            2: 90,   # E
+            3: 135,  # SE
+            4: 180,  # S
+            5: 225,  # SW
+            6: 270,  # W
+            7: 315,  # NW
+            8: None  # STAY (no direction)
+        }
 
     def reset(self, map_type: Optional[str] = None) -> MultiAgentState:
         """
@@ -211,6 +227,9 @@ class MultiAgentCoverageEnv:
 
         # Initialize coordination strategy
         self._initialize_coordination()
+        
+        # Reset last actions for rotation penalty
+        self.last_actions = [None] * self.num_agents
 
         # Perform initial sensing for all agents
         for agent in self.state.agents:
@@ -291,9 +310,23 @@ class MultiAgentCoverageEnv:
         # Apply multi-agent reward normalization (CRITICAL for QMIX stability)
         # Prevents gradient explosion when team rewards get very large
         final_rewards = self._normalize_rewards(final_rewards)
+        
+        # Update last actions for rotation penalty tracking
+        for i, action in enumerate(actions):
+            self.last_actions[i] = action
 
         # Check termination
-        done = self._check_done()
+        done, termination_reason = self._check_done()
+        
+        # Calculate and apply completion bonus
+        completion_bonus = self._calculate_completion_bonus(
+            self.state.step_count, 
+            termination_reason
+        )
+        
+        if completion_bonus > 0:
+            # Apply completion bonus to all agents equally
+            final_rewards = [r + completion_bonus for r in final_rewards]
 
         # Info dictionary
         info = {
@@ -304,7 +337,9 @@ class MultiAgentCoverageEnv:
             'agent_collisions': collision_info['agent_collisions'],
             'coverage_pct': self._get_coverage_percentage(),
             'steps': self.state.step_count,
-            'coordination': self.coordination.value
+            'coordination': self.coordination.value,
+            'termination_reason': termination_reason,
+            'completion_bonus': completion_bonus
         }
 
         return self.state, final_rewards, done, info
@@ -513,9 +548,10 @@ class MultiAgentCoverageEnv:
                     # Update local map with new coverage
                     agent.robot_state.local_map[cell] = (new_coverage, "free")
                 else:
-                    # Binary mode: only update local map
-                    coverage = self.state.world_state.coverage_map[cell[0], cell[1]]
-                    agent.robot_state.local_map[cell] = (coverage, "free")
+                    # Binary mode: instant 100% coverage for sensed cells
+                    self.state.world_state.coverage_map[cell[0], cell[1]] = 1.0
+                    agent.robot_state.coverage_history[cell[0], cell[1]] = 1.0
+                    agent.robot_state.local_map[cell] = (1.0, "free")
 
     def _raycast_sensing(
         self,
@@ -563,7 +599,8 @@ class MultiAgentCoverageEnv:
         # This is approximate - in multi-agent, multiple agents may cover same cell
         # We attribute coverage to all agents who sensed it
         current_coverage = self.state.world_state.coverage_map
-        newly_covered = np.sum((current_coverage > 0.5) & (prev_coverage_map < 0.5))
+        newly_covered = np.sum((current_coverage >= config.COVERAGE_THRESHOLD) & 
+                              (prev_coverage_map < config.COVERAGE_THRESHOLD))
 
         # Divide by number of agents (approximate attribution)
         return int(newly_covered / self.num_agents)
@@ -571,8 +608,49 @@ class MultiAgentCoverageEnv:
     def _calculate_total_coverage_gain(self, prev_coverage_map: np.ndarray) -> int:
         """Calculate total newly covered cells (team metric)."""
         current_coverage = self.state.world_state.coverage_map
-        newly_covered = np.sum((current_coverage > 0.5) & (prev_coverage_map < 0.5))
+        newly_covered = np.sum((current_coverage >= config.COVERAGE_THRESHOLD) & 
+                              (prev_coverage_map < config.COVERAGE_THRESHOLD))
         return int(newly_covered)
+
+    def _compute_rotation_penalty(self, agent_id: int, current_action: int) -> float:
+        """
+        Compute rotation penalty for specific agent.
+        
+        Args:
+            agent_id: ID of the agent
+            current_action: Current action [0-8]
+        
+        Returns:
+            Negative reward proportional to rotation angle (0 to -0.15)
+        """
+        if not config.USE_ROTATION_PENALTY:
+            return 0.0
+        
+        # No penalty on first move or after STAY
+        if self.last_actions[agent_id] is None or self.last_actions[agent_id] == 8:
+            return 0.0
+        
+        # STAY action has no rotation
+        if current_action == 8:
+            return 0.0
+        
+        # Get angles for both actions
+        last_angle = self.action_angles[self.last_actions[agent_id]]
+        current_angle = self.action_angles[current_action]
+        
+        # Calculate minimum rotation (accounting for 360° wrap-around)
+        angle_diff = abs(current_angle - last_angle)
+        angle_diff = min(angle_diff, 360 - angle_diff)
+        
+        # Apply graduated penalties based on rotation magnitude
+        if angle_diff == 0:
+            return 0.0  # No rotation
+        elif angle_diff <= 45:
+            return config.ROTATION_PENALTY_SMALL   # -0.05
+        elif angle_diff <= 90:
+            return config.ROTATION_PENALTY_MEDIUM  # -0.10
+        else:  # 135° or 180°
+            return config.ROTATION_PENALTY_LARGE   # -0.15
 
     def _calculate_agent_reward(
         self,
@@ -593,6 +671,10 @@ class MultiAgentCoverageEnv:
 
         # Exploration reward
         reward += knowledge_gain * config.EXPLORATION_REWARD
+        
+        # Rotation penalty (NEW: encourages smooth paths)
+        rotation_penalty = self._compute_rotation_penalty(agent.agent_id, action)
+        reward += rotation_penalty
 
         # Collision penalty (stronger for agent-agent collisions)
         if collision:
@@ -669,16 +751,66 @@ class MultiAgentCoverageEnv:
 
         return frontiers
 
-    def _check_done(self) -> bool:
-        """Check if episode should terminate."""
+    def _check_done(self) -> Tuple[bool, str]:
+        """
+        Check if episode should terminate.
+        
+        Returns:
+            done: Whether episode is complete
+            reason: Termination reason ('max_steps', 'early_completion', 'high_coverage', or 'incomplete')
+        """
+        # Max steps reached
         if self.state.step_count >= self.max_steps:
-            return True
+            return True, 'max_steps'
 
-        coverage_pct = self._get_coverage_percentage()
-        if coverage_pct > 0.95:
-            return True
+        # Early termination (multi-agent only)
+        if config.ENABLE_EARLY_TERMINATION_MULTI:
+            coverage_pct = self._get_coverage_percentage()
+            
+            # Check minimum steps constraint first
+            if self.state.step_count >= config.EARLY_TERM_MIN_STEPS_MULTI:
+                # Check if coverage target reached
+                if coverage_pct >= config.EARLY_TERM_COVERAGE_TARGET_MULTI:
+                    return True, 'early_completion'
+                
+                # Legacy high coverage termination (kept for backwards compatibility)
+                if coverage_pct > 0.95:
+                    return True, 'high_coverage'
+        else:
+            # Without early termination, only check legacy high coverage
+            coverage_pct = self._get_coverage_percentage()
+            if coverage_pct > 0.95:
+                return True, 'high_coverage'
 
-        return False
+        return False, 'incomplete'
+    
+    def _calculate_completion_bonus(self, steps_used: int, termination_reason: str) -> float:
+        """
+        Calculate completion bonus for early termination.
+        
+        Encourages agents to complete coverage efficiently by rewarding
+        earlier completions with larger bonuses.
+        
+        Args:
+            steps_used: Number of steps taken in episode
+            termination_reason: Why episode terminated
+            
+        Returns:
+            bonus: Completion bonus (0 if no early completion)
+        """
+        if termination_reason != 'early_completion':
+            return 0.0
+        
+        # Calculate steps saved
+        steps_saved = self.max_steps - steps_used
+        
+        # Flat bonus + per-step bonus
+        flat_bonus = config.EARLY_TERM_COMPLETION_BONUS
+        time_bonus = steps_saved * config.EARLY_TERM_TIME_BONUS_PER_STEP
+        
+        total_bonus = flat_bonus + time_bonus
+        
+        return total_bonus
     
     def _normalize_rewards(self, rewards: List[float]) -> List[float]:
         """
@@ -723,7 +855,7 @@ class MultiAgentCoverageEnv:
         return normalized
 
     def _get_coverage_percentage(self) -> float:
-        """Calculate coverage percentage."""
+        """Calculate coverage percentage using threshold from config."""
         total_free_cells = (
             self.grid_size * self.grid_size -
             len(self.state.world_state.obstacles)
@@ -732,7 +864,7 @@ class MultiAgentCoverageEnv:
         if total_free_cells == 0:
             return 0.0
 
-        covered_cells = np.sum(self.state.world_state.coverage_map > 0.5)
+        covered_cells = np.sum(self.state.world_state.coverage_map >= config.COVERAGE_THRESHOLD)
         return covered_cells / total_free_cells
 
     def get_observations(self) -> List[Dict]:

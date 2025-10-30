@@ -152,8 +152,11 @@ class FCNAgent:
         grid[0] = visited
 
         # Channel 1: Coverage probability
-        if hasattr(world_state, 'coverage_map') and world_state.coverage_map is not None:
-            grid[1] = np.array(world_state.coverage_map, dtype=np.float32)
+        # Use agent's own coverage_history (not shared world_state.coverage_map)
+        # This ensures agents only see what they've personally sensed
+        # (unless communication merges knowledge)
+        if hasattr(robot_state, 'coverage_history') and robot_state.coverage_history is not None:
+            grid[1] = np.array(robot_state.coverage_history, dtype=np.float32)
         else:
             # Fallback: Binary coverage (visited = covered)
             grid[1] = visited

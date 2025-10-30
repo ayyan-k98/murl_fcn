@@ -24,159 +24,178 @@ class CurriculumManager:
 
     def _initialize_phases(self) -> List[CurriculumPhase]:
         """
-        Initialize all 13 curriculum phases.
+        Initialize all 13 curriculum phases + consolidation - 1500 EPISODES TOTAL.
 
         Design principles:
             - Gradual difficulty increase
-            - Overlearning on early phases
+            - 1200 episodes for core curriculum (13 phases)
+            - 300 episodes for consolidation
             - Interleaving of map types
-            - Mastery gates (expected_coverage thresholds)
+            - Mastery gates (expected_coverage thresholds adjusted for 0.85 threshold)
             - Phase-specific epsilon decay (fast for simple, slow for complex)
+        
+        Total: 1500 episodes (~8.3 hours @ 20s/ep)
         """
         phases = [
-            # Phase 1: Foundation - Pure open environments
-            # FIXED: Read epsilon decay from config for consistent tuning
-            # Floor 0.05 allows full decay within 500 episodes
+            # Phase 1: Foundation - Pure open environments (250 eps)
             CurriculumPhase(
                 name="Phase1_Foundation_PureOpen",
                 start_ep=0,
-                end_ep=500,
+                end_ep=250,
                 map_distribution={"empty": 1.0},
-                expected_coverage=0.70,
-                epsilon_floor=0.05,  # FIXED: Was 0.50 (prevented decay!)
-                epsilon_decay=config.EPSILON_DECAY_PHASE1  # FIXED: Read from config
+                expected_coverage=0.60,  # Reduced from 0.70 due to higher threshold
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE1
             ),
 
-            # Phase 2: Introduce random obstacles
+            # Phase 2: Introduce random obstacles (150 eps)
             CurriculumPhase(
                 name="Phase2_IntroObstacles",
-                start_ep=500,
-                end_ep=800,
+                start_ep=250,
+                end_ep=400,
                 map_distribution={"empty": 0.6, "random": 0.4},
-                expected_coverage=0.70,
-                epsilon_floor=0.05,  # FIXED: Was 0.40
-                epsilon_decay=config.EPSILON_DECAY_PHASE2  # FIXED: Read from config
+                expected_coverage=0.60,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE2
             ),
 
-            # Phase 3: More random obstacles
+            # Phase 3: More random obstacles (120 eps)
             CurriculumPhase(
                 name="Phase3_MoreRandom",
-                start_ep=800,
-                end_ep=1100,
+                start_ep=400,
+                end_ep=520,
                 map_distribution={"random": 0.6, "empty": 0.4},
-                expected_coverage=0.72,
-                epsilon_floor=0.05,  # FIXED: Was 0.30
-                epsilon_decay=config.EPSILON_DECAY_PHASE3  # FIXED: Read from config
+                expected_coverage=0.62,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE3
             ),
 
-            # Phase 4: Consolidation 1
+            # Phase 4: Consolidation 1 (40 eps)
             CurriculumPhase(
                 name="Phase4_Consolidation1",
-                start_ep=1100,
-                end_ep=1150,
+                start_ep=520,
+                end_ep=560,
                 map_distribution={"empty": 0.5, "random": 0.5},
-                expected_coverage=0.75,
-                epsilon_floor=0.05,  # FIXED: Was 0.25
-                epsilon_decay=config.EPSILON_DECAY_PHASE4  # FIXED: Read from config
+                expected_coverage=0.65,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE4
             ),
 
-            # Phase 5: Introduce rooms
+            # Phase 5: Introduce rooms (120 eps)
             CurriculumPhase(
                 name="Phase5_IntroRooms",
-                start_ep=1150,
-                end_ep=1300,
+                start_ep=560,
+                end_ep=680,
                 map_distribution={"room": 0.4, "empty": 0.3, "random": 0.3},
-                expected_coverage=0.72,
-                epsilon_floor=0.05,  # FIXED: Was 0.20
-                epsilon_decay=config.EPSILON_DECAY_PHASE5  # FIXED: Read from config
+                expected_coverage=0.62,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE5
             ),
 
-            # Phase 6: More rooms
+            # Phase 6: More rooms (100 eps)
             CurriculumPhase(
                 name="Phase6_MoreRooms",
-                start_ep=1300,
-                end_ep=1450,
+                start_ep=680,
+                end_ep=780,
                 map_distribution={"room": 0.55, "random": 0.25, "empty": 0.20},
-                expected_coverage=0.75,
-                epsilon_floor=0.05,  # FIXED: Was 0.18
-                epsilon_decay=config.EPSILON_DECAY_PHASE6  # FIXED: Read from config
+                expected_coverage=0.65,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE6
             ),
 
-            # Phase 7: Consolidation 2
+            # Phase 7: Consolidation 2 (40 eps)
             CurriculumPhase(
                 name="Phase7_Consolidation2",
-                start_ep=1450,
-                end_ep=1525,
+                start_ep=780,
+                end_ep=820,
                 map_distribution={"empty": 0.35, "random": 0.35, "room": 0.30},
-                expected_coverage=0.78,
-                epsilon_floor=0.05,  # FIXED: Was 0.17
-                epsilon_decay=config.EPSILON_DECAY_PHASE7  # FIXED: Read from config
+                expected_coverage=0.68,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE7
             ),
 
-            # Phase 8: Introduce corridors
+            # Phase 8: Introduce corridors (100 eps)
             CurriculumPhase(
                 name="Phase8_IntroCorridor",
-                start_ep=1525,
-                end_ep=1675,
+                start_ep=820,
+                end_ep=920,
                 map_distribution={"room": 0.45, "corridor": 0.25, "random": 0.20, "empty": 0.10},
-                expected_coverage=0.73,
-                epsilon_floor=0.05,  # FIXED: Was 0.16
-                epsilon_decay=config.EPSILON_DECAY_PHASE8  # FIXED: Read from config
+                expected_coverage=0.63,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE8
             ),
 
-            # Phase 9: Introduce caves
+            # Phase 9: Introduce caves (100 eps)
             CurriculumPhase(
                 name="Phase9_IntroCave",
-                start_ep=1675,
-                end_ep=1825,
+                start_ep=920,
+                end_ep=1020,
                 map_distribution={"room": 0.35, "cave": 0.25, "corridor": 0.20, "random": 0.20},
-                expected_coverage=0.70,
-                epsilon_floor=0.05,  # FIXED: Was 0.16
-                epsilon_decay=config.EPSILON_DECAY_PHASE9  # FIXED: Read from config
+                expected_coverage=0.60,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE9
             ),
 
-            # Phase 10: Consolidation 3
+            # Phase 10: Consolidation 3 (40 eps)
             CurriculumPhase(
                 name="Phase10_Consolidation3",
-                start_ep=1825,
-                end_ep=1900,
+                start_ep=1020,
+                end_ep=1060,
                 map_distribution={"room": 0.40, "corridor": 0.25, "cave": 0.20, "random": 0.15},
-                expected_coverage=0.72,
-                epsilon_floor=0.05,  # FIXED: Was 0.16
-                epsilon_decay=config.EPSILON_DECAY_PHASE10  # FIXED: Read from config
+                expected_coverage=0.62,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE10
             ),
 
-            # Phase 11: Introduce L-shapes
+            # Phase 11: Introduce L-shapes (70 eps)
             CurriculumPhase(
                 name="Phase11_IntroLShape",
-                start_ep=1900,
-                end_ep=2050,
+                start_ep=1060,
+                end_ep=1130,
                 map_distribution={"room": 0.30, "cave": 0.20, "lshape": 0.20, "corridor": 0.15, "random": 0.15},
-                expected_coverage=0.68,
-                epsilon_floor=0.05,  # Keep at 0.05
-                epsilon_decay=config.EPSILON_DECAY_PHASE11  # FIXED: Read from config
+                expected_coverage=0.58,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE11
             ),
 
-            # Phase 12: Complex mix
+            # Phase 12: Complex mix (40 eps)
             CurriculumPhase(
                 name="Phase12_ComplexMix",
-                start_ep=2050,
-                end_ep=2150,
+                start_ep=1130,
+                end_ep=1170,
                 map_distribution={"room": 0.25, "cave": 0.20, "lshape": 0.20, "corridor": 0.20, "random": 0.15},
-                expected_coverage=0.70,
-                epsilon_floor=0.05,  # Keep at 0.05
-                epsilon_decay=config.EPSILON_DECAY_PHASE12  # FIXED: Read from config
+                expected_coverage=0.60,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE12
             ),
 
-            # Phase 13: Final polish
+            # Phase 13: Final polish (30 eps)
             CurriculumPhase(
                 name="Phase13_FinalPolish",
-                start_ep=2150,
-                end_ep=2250,
+                start_ep=1170,
+                end_ep=1200,
                 map_distribution={"room": 0.25, "empty": 0.20, "random": 0.20, "cave": 0.15, "corridor": 0.10, "lshape": 0.10},
-                expected_coverage=0.72,
-                epsilon_floor=0.05,  # Keep at 0.05
-                epsilon_decay=config.EPSILON_DECAY_PHASE13  # FIXED: Read from config
+                expected_coverage=0.62,
+                epsilon_floor=0.05,
+                epsilon_decay=config.EPSILON_DECAY_PHASE13
+            ),
+            
+            # Phase 14: Extended consolidation - All map types (300 eps)
+            CurriculumPhase(
+                name="Phase14_ExtendedConsolidation",
+                start_ep=1200,
+                end_ep=1500,
+                map_distribution={
+                    "room": 0.30,
+                    "cave": 0.20,
+                    "corridor": 0.15,
+                    "random": 0.15,
+                    "lshape": 0.10,
+                    "empty": 0.10
+                },
+                expected_coverage=0.65,
+                epsilon_floor=0.05,
+                epsilon_decay=0.995  # Very slow decay for consolidation
             ),
         ]
 
@@ -232,7 +251,7 @@ class CurriculumManager:
     def get_summary(self) -> str:
         """Get curriculum summary."""
         summary = "=" * 80 + "\n"
-        summary += "CURRICULUM OVERVIEW (Phase-Specific Epsilon Decay)\n"
+        summary += "CURRICULUM OVERVIEW (1500 Episodes: 1200 Core + 300 Consolidation)\n"
         summary += "=" * 80 + "\n"
         summary += f"{'Phase':<6} {'Episodes':<15} {'ε Decay':<10} {'Map Mix':<30} {'Target'}\n"
         summary += "-" * 80 + "\n"
@@ -249,12 +268,17 @@ class CurriculumManager:
             summary += f"{i:<6} {ep_range:<15} {decay_str:<10} {map_mix:<30} {target}\n"
 
         summary += "=" * 80 + "\n"
-        summary += "Strategy:\n"
-        summary += "  - FIXED: All phases now read epsilon decay from config.py\n"
+        summary += "Key Changes:\n"
+        summary += "  - COVERAGE_THRESHOLD increased to 0.85 (cells need 85% coverage to count)\n"
+        summary += "  - Expected coverage reduced ~10-15% due to higher threshold\n"
+        summary += "  - Rotation penalties added for smoother trajectories\n"
+        summary += "  - Phase 14: 300-episode consolidation for mastery\n"
+        summary += "\nStrategy:\n"
         summary += "  - Phase 1 (0.98): Fast decay - Agent exploits by ep 50 (ε→0.36)\n"
         summary += "  - Phases 2,5,8,9 (0.985): Moderate decay - New environments\n"
         summary += "  - Phases 3,6,11 (0.987): Slower decay - Complex environments\n"
         summary += "  - Phases 4,7,10,12,13 (0.990-0.992): Slowest - Consolidation\n"
+        summary += "  - Phase 14 (0.995): Minimal decay - Extended consolidation\n"
         summary += "=" * 80
 
         return summary
