@@ -119,6 +119,7 @@ def train_multi_agent(
     shared_replay: bool = True,
     use_curriculum: bool = True,
     use_6ch: bool = True,  # FIXED: Enable 6th channel (agent occupancy) by default
+    use_qmix: bool = False,  # FIXED: Enable QMIX for coordinated learning
     comm_protocol: str = 'none',
     experiment_name: Optional[str] = None,
     resume_from: Optional[str] = None
@@ -176,6 +177,23 @@ def train_multi_agent(
     )
 
     # Initialize trainer
+    # TODO: Implement QMIX integration
+    # When use_qmix=True, should use QMIXAgent instead of MultiAgentTrainer
+    # This requires:
+    # 1. Import QMIXAgent from qmix_agent
+    # 2. Modify training loop to use QMIXAgent.optimize() instead of trainer.train_step()
+    # 3. Use QMIXAgent.store_transition() for replay buffer
+    if use_qmix:
+        print("\n" + "="*70)
+        print("⚠️  WARNING: QMIX Integration Incomplete")
+        print("="*70)
+        print("use_qmix=True, but QMIX is not fully integrated into trainer yet.")
+        print("Falling back to independent multi-agent DQN for now.")
+        print("QMIX integration requires substantial training loop changes.")
+        print("See ENGINEERING_ANALYSIS_CRITICAL.md Part 7.1 for implementation details.")
+        print("="*70 + "\n")
+        # For now, continue with regular trainer
+
     trainer = MultiAgentTrainer(
         num_agents=num_agents,
         grid_size=ma_config.GRID_SIZE,
@@ -439,6 +457,12 @@ def main():
     )
 
     parser.add_argument(
+        '--use-qmix',
+        action='store_true',
+        help='Use QMIX for centralized training with joint Q-value learning (CRITICAL for coordination)'
+    )
+
+    parser.add_argument(
         '--comm-protocol',
         type=str,
         default='none',
@@ -488,6 +512,7 @@ def main():
         shared_replay=not args.no_shared_replay,
         use_curriculum=not args.no_curriculum,
         use_6ch=args.use_6ch,
+        use_qmix=args.use_qmix,  # FIXED: Pass QMIX flag
         comm_protocol=args.comm_protocol,
         experiment_name=args.experiment_name,
         resume_from=args.resume_from
