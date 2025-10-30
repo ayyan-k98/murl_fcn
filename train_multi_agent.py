@@ -466,8 +466,8 @@ def main():
         '--comm-protocol',
         type=str,
         default='none',
-        choices=['none', 'full_state'],
-        help='Communication protocol (default: none)'
+        choices=['none'],
+        help='Communication protocol (default: none). Position info via --use-6ch flag.'
     )
 
     parser.add_argument(

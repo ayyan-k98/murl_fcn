@@ -34,8 +34,9 @@ from multi_agent_config import ma_config
 from config import config
 from communication import get_communication_protocol
 from agent_occupancy import AgentOccupancyComputer
-from collision_avoidance import CollisionAvoider
-from potential_based_shaping import get_shaper_config
+# REMOVED: collision_avoidance and potential_based_shaping (dead code, deleted during cleanup)
+# from collision_avoidance import CollisionAvoider
+# from potential_based_shaping import get_shaper_config
 from coordination_metrics import CoordinationAnalyzer, CoordinationMetrics, coordination_score
 
 

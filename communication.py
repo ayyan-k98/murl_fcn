@@ -1,14 +1,15 @@
 """
 Communication Module for Multi-Agent Coordination
 
-Implements two communication strategies:
-1. No Communication (baseline)
-2. Full State Sharing (upper bound)
+Implements communication strategy:
+- No Communication (baseline) - Position info via agent_occupancy 6th channel
+
+REMOVED: FullStateSharing (wrong approach - bypasses coordination learning)
 
 Communication Policy:
-- When to communicate: Every N steps
-- What to communicate: Map knowledge and positions
-- Who to communicate with: All agents (broadcast)
+- Position/velocity information communicated via agent_occupancy.py (6th input channel)
+- This provides realistic, limited bandwidth communication
+- Agents must learn to coordinate from limited position information
 """
 
 import torch
@@ -97,89 +98,6 @@ class NoCommunciation(CommunicationProtocol):
         return False
 
 
-class FullStateSharing(CommunicationProtocol):
-    """
-    Upper bound: Share full state information.
-
-    Each agent broadcasts its complete local map and position.
-    Not realistic (high bandwidth), but provides performance upper bound.
-    """
-
-    def __init__(self, num_agents: int, grid_size: int = 20):
-        super().__init__(num_agents, message_dim=grid_size*grid_size + 2)
-        self.grid_size = grid_size
-
-    def communicate(self, observations: List[Dict], state) -> List[Message]:
-        """
-        Create messages from all agents sharing their full state.
-        
-        Args:
-            observations: List of agent observations
-            state: Current world state
-            
-        Returns:
-            messages: List of messages (one per agent)
-        """
-        messages = []
-        for i, obs in enumerate(observations):
-            robot_state = obs['robot_state']
-            position = robot_state.position
-            
-            # Create coverage map from visited positions
-            local_map = torch.zeros(self.grid_size, self.grid_size)
-            for pos in robot_state.visited_positions:
-                local_map[pos[0], pos[1]] = 1.0
-            
-            msg = self.encode_message(i, local_map, position)
-            messages.append(msg)
-        
-        return messages
-
-    def encode_message(self, agent_id: int, local_map: torch.Tensor,
-                      position: Tuple[int, int]) -> Message:
-        """
-        Encode full local map + position.
-
-        Args:
-            local_map: [H, W] coverage map
-            position: (x, y) position
-        """
-        # Flatten map and append position
-        content = torch.cat([
-            local_map.flatten(),
-            torch.tensor([position[0], position[1]], dtype=torch.float32)
-        ])
-
-        return Message(
-            sender_id=agent_id,
-            receiver_id=None,  # Broadcast
-            content=content,
-            metadata={'position': position}
-        )
-
-    def aggregate_messages(self, agent_id: int, messages: List[Message]) -> Dict:
-        """Merge all agents' local maps."""
-        merged_maps = {}
-        positions = {}
-
-        for msg in messages:
-            if msg.sender_id != agent_id:
-                # Extract map and position
-                map_flat = msg.content[:-2]
-                pos = msg.content[-2:].numpy().astype(int)
-
-                merged_maps[msg.sender_id] = map_flat.view(self.grid_size, self.grid_size)
-                positions[msg.sender_id] = tuple(pos)
-
-        return {
-            'maps': merged_maps,
-            'positions': positions
-        }
-
-    def should_communicate(self, step: int) -> bool:
-        return step % 10 == 0  # Communicate every 10 steps
-
-
 def get_communication_protocol(
     protocol_name: str,
     num_agents: int,
@@ -190,21 +108,23 @@ def get_communication_protocol(
     Factory function to create communication protocol.
 
     Args:
-        protocol_name: Protocol name ['none', 'full_state']
+        protocol_name: Protocol name ['none'] (only option after cleanup)
         num_agents: Number of agents
-        grid_size: Grid size
-        comm_range: Communication range (unused, for API compatibility)
+        grid_size: Grid size (unused, kept for API compatibility)
+        comm_range: Communication range (unused, kept for API compatibility)
 
     Returns:
         CommunicationProtocol instance
+
+    Note:
+        Position communication now handled via agent_occupancy.py (6th channel).
+        Use --use-6ch flag to enable position channel.
     """
     if protocol_name == 'none':
         return NoCommunciation(num_agents=num_agents)
-    elif protocol_name == 'full_state':
-        return FullStateSharing(num_agents=num_agents, grid_size=grid_size)
     else:
         raise ValueError(f"Unknown protocol: {protocol_name}. "
-                        f"Choose from: none, full_state")
+                        f"Only 'none' supported. Use --use-6ch for position channel via agent_occupancy.py")
 
 
 if __name__ == "__main__":
@@ -212,7 +132,6 @@ if __name__ == "__main__":
     print("Testing Communication Protocols...")
 
     num_agents = 4
-    grid_size = 20
 
     # Test No Communication
     print("\n1. Testing NoCommunciation...")
@@ -221,21 +140,19 @@ if __name__ == "__main__":
     agg = no_comm.aggregate_messages(0, [msg])
     print(f"   ✓ NoCommunciation: message_dim={no_comm.message_dim}, should_comm={no_comm.should_communicate(0)}")
 
-    # Test Full State Sharing
-    print("\n2. Testing FullStateSharing...")
-    full_state = FullStateSharing(num_agents=num_agents, grid_size=grid_size)
-    local_map = torch.rand(grid_size, grid_size)
-    position = (10, 10)
-    msg = full_state.encode_message(0, local_map, position)
-    print(f"   ✓ FullStateSharing: message_dim={full_state.message_dim}, should_comm={full_state.should_communicate(10)}")
-    print(f"   ✓ Message content size: {msg.content.shape}")
-    print(f"   ✓ Position encoded: {msg.metadata['position']}")
-
     # Test factory function
-    print("\n3. Testing factory function...")
+    print("\n2. Testing factory function...")
     proto_none = get_communication_protocol('none', num_agents=4)
-    proto_full = get_communication_protocol('full_state', num_agents=4, grid_size=20)
     print(f"   ✓ Factory creates NoCommunciation: {isinstance(proto_none, NoCommunciation)}")
-    print(f"   ✓ Factory creates FullStateSharing: {isinstance(proto_full, FullStateSharing)}")
+
+    # Test error handling
+    print("\n3. Testing error handling...")
+    try:
+        proto_bad = get_communication_protocol('full_state', num_agents=4)
+        print(f"   ✗ Should have raised error for 'full_state'")
+    except ValueError as e:
+        print(f"   ✓ Correctly rejects 'full_state': {str(e)[:50]}...")
 
     print("\n✓ All communication protocol tests passed!")
+    print("\nNOTE: Position communication now via agent_occupancy.py (6th channel)")
+    print("      Use --use-6ch flag when training for position information.")
