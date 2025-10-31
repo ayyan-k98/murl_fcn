@@ -177,15 +177,30 @@ def train_multi_agent(
     )
 
     # Initialize trainer
-    # Initialize trainer with QMIX support
+    # TODO: Implement QMIX integration
+    # When use_qmix=True, should use QMIXAgent instead of MultiAgentTrainer
+    # This requires:
+    # 1. Import QMIXAgent from qmix_agent
+    # 2. Modify training loop to use QMIXAgent.optimize() instead of trainer.train_step()
+    # 3. Use QMIXAgent.store_transition() for replay buffer
+    if use_qmix:
+        print("\n" + "="*70)
+        print("⚠️  WARNING: QMIX Integration Incomplete")
+        print("="*70)
+        print("use_qmix=True, but QMIX is not fully integrated into trainer yet.")
+        print("Falling back to independent multi-agent DQN for now.")
+        print("QMIX integration requires substantial training loop changes.")
+        print("See ENGINEERING_ANALYSIS_CRITICAL.md Part 7.1 for implementation details.")
+        print("="*70 + "\n")
+        # For now, continue with regular trainer
+
     trainer = MultiAgentTrainer(
         num_agents=num_agents,
         grid_size=ma_config.GRID_SIZE,
         coordination=coordination,
         parameter_sharing=parameter_sharing,
         shared_replay=shared_replay,
-        input_channels=6 if use_6ch else 5,
-        use_qmix=use_qmix
+        input_channels=6 if use_6ch else 5
     )
 
     # Load pre-trained single-agent checkpoint if provided
@@ -283,13 +298,25 @@ def train_multi_agent(
             # Enhanced logging with coordination metrics
             coord_score = episode_info.get('coordination_score', 0.0)
             coord_metrics = episode_info.get('coordination_metrics', None)
-            
-            print(f"Ep {episode} | "
-                  f"Cov: {episode_info['team_coverage']*100:.1f}% | "
-                  f"Coord: {coord_score:.1f}/100 | "
-                  f"Rew: {episode_info['team_reward']:.1f} | "
-                  f"Len: {episode_info['episode_length']} | "
-                  f"Eps: {trainer.epsilon:.3f}")
+
+            # Derive overlap and efficiency (prefer coord_metrics object if present)
+            if coord_metrics is not None:
+                overlap_pct = coord_metrics.overlap_ratio * 100
+                efficiency_pct = coord_metrics.exploration_efficiency * 100
+            else:
+                overlap_val = episode_info.get('overlap', None)
+                efficiency_val = episode_info.get('efficiency', None)
+                overlap_pct = (overlap_val * 100) if overlap_val is not None else float('nan')
+                efficiency_pct = (efficiency_val * 100) if efficiency_val is not None else float('nan')
+
+            print(f"Ep {episode:4d} | "
+                  f"Cov: {episode_info['team_coverage']*100:5.1f}% | "
+                  f"Overlap: {overlap_pct:5.1f}% | "
+                  f"Coord: {coord_score:5.1f}/100 | "
+                  f"Rew: {episode_info['team_reward']:7.1f} | "
+                  f"Len: {episode_info['episode_length']:3d} | "
+                  f"Eff: {efficiency_pct:5.1f}% | "
+                  f"ε: {trainer.epsilon:.3f}")
             
             # DEBUG: Print coverage map statistics
             # Show Agent 0's local coverage (not shared world_state coverage_map)
@@ -299,6 +326,23 @@ def train_multi_agent(
                 print(f"  [DEBUG] Steps={episode_info['episode_length']} | "
                       f"Agent0 coverage: min={np.min(cov_map):.3f}, max={np.max(cov_map):.3f}, "
                       f"mean={np.mean(cov_map):.3f}, cells>0.85={np.sum(cov_map >= 0.85)}")
+                # Compact coordination summary (print every LOG_FREQ)
+                # Prefer values from coord_metrics if present, else fall back to episode_info
+                if coord_metrics is not None:
+                    overlap_pct = coord_metrics.overlap_ratio * 100
+                    efficiency_pct = coord_metrics.exploration_efficiency * 100
+                    balance_val = coord_metrics.load_balance_ratio
+                    collisions_short = coord_metrics.agent_collisions + coord_metrics.obstacle_collisions
+                else:
+                    overlap_val = episode_info.get('overlap', None)
+                    efficiency_val = episode_info.get('efficiency', None)
+                    overlap_pct = (overlap_val * 100) if overlap_val is not None else float('nan')
+                    efficiency_pct = (efficiency_val * 100) if efficiency_val is not None else float('nan')
+                    balance_val = episode_info.get('balance', float('nan'))
+                    collisions_short = episode_info.get('collisions', 0)
+
+                print(f"  Overlap: {overlap_pct:5.1f}% | Efficiency: {efficiency_pct:5.1f}% | "
+                      f"Balance: {balance_val:.2f} | Collisions: {collisions_short}")
             
             if coord_metrics and episode % (ma_config.LOG_FREQ * 5) == 0:
                 # Print detailed coordination breakdown every 5*LOG_FREQ episodes
