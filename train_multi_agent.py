@@ -177,30 +177,15 @@ def train_multi_agent(
     )
 
     # Initialize trainer
-    # TODO: Implement QMIX integration
-    # When use_qmix=True, should use QMIXAgent instead of MultiAgentTrainer
-    # This requires:
-    # 1. Import QMIXAgent from qmix_agent
-    # 2. Modify training loop to use QMIXAgent.optimize() instead of trainer.train_step()
-    # 3. Use QMIXAgent.store_transition() for replay buffer
-    if use_qmix:
-        print("\n" + "="*70)
-        print("⚠️  WARNING: QMIX Integration Incomplete")
-        print("="*70)
-        print("use_qmix=True, but QMIX is not fully integrated into trainer yet.")
-        print("Falling back to independent multi-agent DQN for now.")
-        print("QMIX integration requires substantial training loop changes.")
-        print("See ENGINEERING_ANALYSIS_CRITICAL.md Part 7.1 for implementation details.")
-        print("="*70 + "\n")
-        # For now, continue with regular trainer
-
+    # Initialize trainer with QMIX support
     trainer = MultiAgentTrainer(
         num_agents=num_agents,
         grid_size=ma_config.GRID_SIZE,
         coordination=coordination,
         parameter_sharing=parameter_sharing,
         shared_replay=shared_replay,
-        input_channels=6 if use_6ch else 5
+        input_channels=6 if use_6ch else 5,
+        use_qmix=use_qmix
     )
 
     # Load pre-trained single-agent checkpoint if provided

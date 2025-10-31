@@ -47,7 +47,8 @@ class MultiAgentTrainer:
         input_channels: int = 6,  # FIXED: Default to 6 (adds agent occupancy channel)
         learning_rate: float = None,
         gamma: float = None,
-        device: str = None
+        device: str = None,
+        use_qmix: bool = False
     ):
         """
         Initialize multi-agent trainer.
@@ -62,6 +63,7 @@ class MultiAgentTrainer:
             learning_rate: Learning rate (default from config)
             gamma: Discount factor (default from config)
             device: Compute device (default from config)
+            use_qmix: If True, use QMIX for centralized training (CTDE)
         """
         self.num_agents = num_agents
         self.grid_size = grid_size
@@ -134,6 +136,61 @@ class MultiAgentTrainer:
             'coordination_scores': []
         }
 
+        # QMIX (Centralized Training, Decentralized Execution)
+        self.use_qmix = use_qmix
+        if self.use_qmix:
+            from qmix import QMixingNetwork, QMIXLoss
+            import torch
+            from collections import deque
+
+            # Global state dimension (from env.get_global_state())
+            # Coverage map (1600) + positions (8) + coverage % (1) + progress (1)
+            state_dim = grid_size * grid_size + num_agents * 2 + 2
+
+            # QMIX mixing network
+            self.mixing_net = QMixingNetwork(
+                num_agents=num_agents,
+                state_dim=state_dim,
+                embed_dim=32,
+                hypernet_embed=64
+            ).to(self.device)
+
+            # Target mixing network
+            self.target_mixing_net = QMixingNetwork(
+                num_agents=num_agents,
+                state_dim=state_dim,
+                embed_dim=32,
+                hypernet_embed=64
+            ).to(self.device)
+            self.target_mixing_net.load_state_dict(self.mixing_net.state_dict())
+
+            # QMIX loss function
+            self.qmix_loss_fn = QMIXLoss(gamma=self.gamma)
+
+            # Team replay buffer for QMIX (stores joint transitions)
+            # Each transition: (states, actions, rewards, next_states, done, global_state, next_global_state)
+            self.team_replay_buffer = deque(maxlen=config.REPLAY_BUFFER_SIZE)
+
+            # Optimizer includes all agent networks + mixing network
+            all_params = []
+            if parameter_sharing:
+                all_params.extend(self.shared_agent.network.parameters())
+            else:
+                for agent in self.agents:
+                    all_params.extend(agent.network.parameters())
+            all_params.extend(self.mixing_net.parameters())
+
+            self.qmix_optimizer = torch.optim.Adam(all_params, lr=self.learning_rate)
+
+            print(f"✓ QMIX enabled: Centralized training with decentralized execution")
+            print(f"  State dim: {state_dim}, Mixing embed: 32")
+        else:
+            self.mixing_net = None
+            self.target_mixing_net = None
+            self.qmix_loss_fn = None
+            self.qmix_optimizer = None
+            self.team_replay_buffer = None
+
     def select_actions(
         self,
         observations: List[Dict],
@@ -184,7 +241,9 @@ class MultiAgentTrainer:
         done: bool,
         info: Dict,
         agent_occupancies: Optional[List] = None,
-        next_agent_occupancies: Optional[List] = None
+        next_agent_occupancies: Optional[List] = None,
+        global_state: Optional[np.ndarray] = None,
+        next_global_state: Optional[np.ndarray] = None
     ):
         """
         Store transitions for all agents.
@@ -198,11 +257,17 @@ class MultiAgentTrainer:
             info: Info dict from environment
             agent_occupancies: Optional list of current occupancy maps
             next_agent_occupancies: Optional list of next occupancy maps
+            global_state: Optional global state (for QMIX)
+            next_global_state: Optional next global state (for QMIX)
         """
         if agent_occupancies is None:
             agent_occupancies = [None] * self.num_agents
         if next_agent_occupancies is None:
             next_agent_occupancies = [None] * self.num_agents
+
+        # Store individual agent transitions
+        state_tensors = []
+        next_state_tensors = []
 
         for i in range(self.num_agents):
             # Extract states
@@ -213,17 +278,20 @@ class MultiAgentTrainer:
             # Encode states (with optional occupancy)
             agent = self.agents[i]
             state_tensor = agent._encode_state(
-                robot_state, 
+                robot_state,
                 world_state,
                 agent_occupancy=agent_occupancies[i]
             )
             next_state_tensor = agent._encode_state(
-                next_robot_state, 
+                next_robot_state,
                 world_state,
                 agent_occupancy=next_agent_occupancies[i]
             )
 
-            # Store in replay memory
+            state_tensors.append(state_tensor)
+            next_state_tensors.append(next_state_tensor)
+
+            # Store in individual agent replay memory
             transition_info = {
                 'coverage_gain': info['individual_coverage_gains'][i],
                 'knowledge_gain': info['knowledge_gains'][i],
@@ -239,6 +307,19 @@ class MultiAgentTrainer:
                 transition_info
             )
 
+        # Store team transition for QMIX
+        if self.use_qmix and global_state is not None and next_global_state is not None:
+            team_transition = (
+                state_tensors,
+                actions,
+                rewards,
+                next_state_tensors,
+                done,
+                global_state,
+                next_global_state
+            )
+            self.team_replay_buffer.append(team_transition)
+
     def optimize_agents(self) -> Dict[int, Optional[float]]:
         """
         Optimize all agents (centralized training).
@@ -246,6 +327,13 @@ class MultiAgentTrainer:
         Returns:
             losses: Dict mapping agent_id -> loss (None if not trained)
         """
+        if self.use_qmix:
+            return self._optimize_qmix()
+        else:
+            return self._optimize_independent()
+
+    def _optimize_independent(self) -> Dict[int, Optional[float]]:
+        """Independent Q-learning for each agent."""
         losses = {}
 
         if self.parameter_sharing:
@@ -275,13 +363,123 @@ class MultiAgentTrainer:
 
         return losses
 
+    def _optimize_qmix(self) -> Dict[int, Optional[float]]:
+        """
+        QMIX training: Centralized training with decentralized execution.
+
+        Computes individual Q-values for each agent, then mixes them using
+        the QMIX mixing network conditioned on global state.
+        """
+        import torch
+        import random
+
+        if len(self.team_replay_buffer) < config.MIN_REPLAY_SIZE:
+            return {0: None}
+
+        # Sample batch from team replay buffer
+        batch_size = min(config.BATCH_SIZE, len(self.team_replay_buffer))
+        batch = random.sample(self.team_replay_buffer, batch_size)
+
+        # Unpack batch
+        states_batch = []  # [batch_size, num_agents, channels, H, W]
+        actions_batch = []  # [batch_size, num_agents]
+        rewards_batch = []  # [batch_size, num_agents]
+        next_states_batch = []  # [batch_size, num_agents, channels, H, W]
+        dones_batch = []  # [batch_size]
+        global_states_batch = []  # [batch_size, state_dim]
+        next_global_states_batch = []  # [batch_size, state_dim]
+
+        for (states, actions, rewards, next_states, done, global_state, next_global_state) in batch:
+            states_batch.append(states)
+            actions_batch.append(actions)
+            rewards_batch.append(rewards)
+            next_states_batch.append(next_states)
+            dones_batch.append(done)
+            global_states_batch.append(torch.from_numpy(global_state).float())
+            next_global_states_batch.append(torch.from_numpy(next_global_state).float())
+
+        # === Compute current Q-values ===
+        # Individual Q-values for chosen actions
+        agent_qs = []
+        for i, agent in enumerate(self.agents):
+            # Stack states for agent i across batch
+            state_batch = torch.stack([states_batch[b][i] for b in range(batch_size)])
+            state_batch = state_batch.to(self.device)
+
+            # Get Q-values for all actions
+            q_values = agent.network(state_batch)  # [batch, num_actions]
+
+            # Extract Q-values for chosen actions
+            actions_tensor = torch.tensor([actions_batch[b][i] for b in range(batch_size)])
+            actions_tensor = actions_tensor.to(self.device).unsqueeze(1)  # [batch, 1]
+
+            q_chosen = q_values.gather(1, actions_tensor)  # [batch, 1]
+            agent_qs.append(q_chosen)
+
+        agent_qs = torch.cat(agent_qs, dim=1)  # [batch, num_agents]
+
+        # Mix individual Q-values using global state
+        global_state_batch = torch.stack(global_states_batch).to(self.device)
+        q_tot = self.mixing_net(agent_qs, global_state_batch)  # [batch, 1]
+
+        # === Compute target Q-values ===
+        with torch.no_grad():
+            target_agent_qs = []
+            for i, agent in enumerate(self.agents):
+                # Stack next states for agent i across batch
+                next_state_batch = torch.stack([next_states_batch[b][i] for b in range(batch_size)])
+                next_state_batch = next_state_batch.to(self.device)
+
+                # Get max Q-values from target network
+                target_q_values = agent.target_network(next_state_batch)
+                target_q_max = target_q_values.max(dim=1, keepdim=True)[0]  # [batch, 1]
+                target_agent_qs.append(target_q_max)
+
+            target_agent_qs = torch.cat(target_agent_qs, dim=1)  # [batch, num_agents]
+
+            # Mix target Q-values
+            next_global_state_batch = torch.stack(next_global_states_batch).to(self.device)
+            target_q_tot = self.target_mixing_net(target_agent_qs, next_global_state_batch)
+
+        # === Compute loss and update ===
+        # Team reward (sum of individual rewards)
+        team_rewards = torch.tensor([sum(rewards_batch[b]) for b in range(batch_size)])
+        team_rewards = team_rewards.unsqueeze(1).float().to(self.device)
+
+        dones_tensor = torch.tensor(dones_batch).unsqueeze(1).float().to(self.device)
+
+        loss = self.qmix_loss_fn(q_tot, target_q_tot, team_rewards, dones_tensor)
+
+        # Optimize
+        self.qmix_optimizer.zero_grad()
+        loss.backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.mixing_net.parameters(), config.GRAD_CLIP_NORM)
+        if self.parameter_sharing:
+            torch.nn.utils.clip_grad_norm_(self.shared_agent.network.parameters(), config.GRAD_CLIP_NORM)
+        else:
+            for agent in self.agents:
+                torch.nn.utils.clip_grad_norm_(agent.network.parameters(), config.GRAD_CLIP_NORM)
+
+        self.qmix_optimizer.step()
+
+        # Track metrics
+        self.metrics['losses'][0].append(loss.item())
+
+        return {0: loss.item()}
+
     def update_target_networks(self):
-        """Update target networks for all agents."""
+        """Update target networks for all agents and QMIX mixing network."""
         if self.parameter_sharing:
             self.agents[0].update_target_network()
         else:
             for agent in self.agents:
                 agent.update_target_network()
+
+        # Update QMIX target mixing network
+        if self.use_qmix:
+            self.target_mixing_net.load_state_dict(self.mixing_net.state_dict())
 
     def decay_epsilon(self, decay_rate: float = 0.995):
         """Decay epsilon for all agents."""
@@ -365,14 +563,24 @@ class MultiAgentTrainer:
             
             # Select actions (with optional occupancy)
             actions = self.select_actions(
-                observations, 
+                observations,
                 epsilon=self.epsilon,
                 agent_occupancies=agent_occupancies
             )
 
+            # Get current global state for QMIX (before step)
+            global_state = None
+            if self.use_qmix:
+                global_state = env.get_global_state()
+
             # Execute actions
             next_state, rewards, done, info = env.step(actions)
             next_observations = env.get_observations()
+
+            # Get next global state for QMIX (after step)
+            next_global_state = None
+            if self.use_qmix:
+                next_global_state = env.get_global_state()
 
             # Compute next occupancies (only if using 6 channels AND communication enabled)
             next_agent_occupancies = None
@@ -386,16 +594,16 @@ class MultiAgentTrainer:
                         'visited': obs['robot_state'].visited_positions,
                         'timestamp': step_count + 1
                     })
-                
+
                 # Recompute messages for next state
                 next_messages = comm_manager.communicate(next_observations, next_state)
-                
+
                 next_agent_occupancies = [
                     occupancy_computer.compute(i, next_messages, step_count + 1)
                     for i in range(self.num_agents)
                 ]
 
-            # Store transitions (with optional occupancies)
+            # Store transitions (with optional occupancies and global states)
             self.store_transitions(
                 observations,
                 actions,
@@ -404,7 +612,9 @@ class MultiAgentTrainer:
                 done,
                 info,
                 agent_occupancies=agent_occupancies,
-                next_agent_occupancies=next_agent_occupancies
+                next_agent_occupancies=next_agent_occupancies,
+                global_state=global_state,
+                next_global_state=next_global_state
             )
 
             # Optimize agents

@@ -1023,6 +1023,58 @@ class MultiAgentCoverageEnv:
         covered_cells = np.sum(self.state.world_state.coverage_map >= config.COVERAGE_THRESHOLD)
         return covered_cells / total_free_cells
 
+    def get_global_state(self) -> np.ndarray:
+        """
+        Get global state for QMIX mixing network.
+
+        Global state includes team-level information that is not available to
+        individual agents but can be used during centralized training:
+        - Team coverage map (1600 values for 40x40)
+        - All agent positions (8 values for 4 agents)
+        - Total coverage percentage (1 value)
+        - Episode progress (1 value)
+
+        Total: 1610 dimensions
+
+        This enables CTDE (Centralized Training, Decentralized Execution):
+        - Training: Use global state for mixing network to optimize team strategy
+        - Execution: Each agent acts based on local observations only
+
+        Returns:
+            global_state: [1610] array with team-level information
+        """
+        # Coverage map (flattened)
+        # Shape: [grid_size * grid_size] = [1600]
+        coverage_map = self.state.world_state.coverage_map.flatten()
+
+        # All agent positions (normalized to [0, 1])
+        # Shape: [num_agents * 2] = [8] for 4 agents
+        positions = []
+        for agent in self.state.agents:
+            positions.extend([
+                agent.robot_state.position[0] / self.grid_size,  # normalized x
+                agent.robot_state.position[1] / self.grid_size   # normalized y
+            ])
+        positions = np.array(positions, dtype=np.float32)
+
+        # Coverage percentage
+        # Shape: [1]
+        coverage_pct = np.array([self._get_coverage_percentage()], dtype=np.float32)
+
+        # Episode progress (normalized to [0, 1])
+        # Shape: [1]
+        progress = np.array([self.state.step_count / self.max_steps], dtype=np.float32)
+
+        # Concatenate all components
+        global_state = np.concatenate([
+            coverage_map,
+            positions,
+            coverage_pct,
+            progress
+        ])
+
+        return global_state
+
     def get_observations(self) -> List[Dict]:
         """
         Get POMDP observations for all agents.
