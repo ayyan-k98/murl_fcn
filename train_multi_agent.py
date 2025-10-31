@@ -135,15 +135,18 @@ def train_multi_agent(
         shared_replay: Use shared replay memory
         use_curriculum: Use curriculum learning
         use_6ch: Use 6-channel input (adds agent occupancy channel)
+        use_qmix: Use QMIX for centralized training with decentralized execution
         comm_protocol: Communication protocol ('none', 'full_state', 'attention')
         experiment_name: Experiment name (auto-generated if None)
+        resume_from: Path to checkpoint to resume from
     """
     # Create experiment name
     if experiment_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         ch_suffix = "6ch" if use_6ch else "5ch"
         comm_suffix = f"_{comm_protocol}" if comm_protocol != 'none' else ""
-        experiment_name = f"ma{num_agents}_{coordination.value}_{ch_suffix}{comm_suffix}_{timestamp}"
+        qmix_suffix = "_qmix" if use_qmix else ""
+        experiment_name = f"ma{num_agents}_{coordination.value}_{ch_suffix}{comm_suffix}{qmix_suffix}_{timestamp}"
 
     print(f"\n{'='*70}")
     print(f"MULTI-AGENT COVERAGE TRAINING")
@@ -152,6 +155,7 @@ def train_multi_agent(
     print(f"Agents: {num_agents}")
     print(f"Input Channels: {6 if use_6ch else 5} ({'with agent occupancy' if use_6ch else 'baseline'})")
     print(f"Communication: {comm_protocol}")
+    print(f"QMIX (CTDE): {'ENABLED' if use_qmix else 'DISABLED'}")
     print(f"Coordination: {coordination.value}")
     print(f"Parameter Sharing: {parameter_sharing}")
     print(f"Shared Replay: {shared_replay}")
@@ -176,31 +180,15 @@ def train_multi_agent(
         collision_penalty=ma_config.AGENT_COLLISION_PENALTY
     )
 
-    # Initialize trainer
-    # TODO: Implement QMIX integration
-    # When use_qmix=True, should use QMIXAgent instead of MultiAgentTrainer
-    # This requires:
-    # 1. Import QMIXAgent from qmix_agent
-    # 2. Modify training loop to use QMIXAgent.optimize() instead of trainer.train_step()
-    # 3. Use QMIXAgent.store_transition() for replay buffer
-    if use_qmix:
-        print("\n" + "="*70)
-        print("⚠️  WARNING: QMIX Integration Incomplete")
-        print("="*70)
-        print("use_qmix=True, but QMIX is not fully integrated into trainer yet.")
-        print("Falling back to independent multi-agent DQN for now.")
-        print("QMIX integration requires substantial training loop changes.")
-        print("See ENGINEERING_ANALYSIS_CRITICAL.md Part 7.1 for implementation details.")
-        print("="*70 + "\n")
-        # For now, continue with regular trainer
-
+    # Initialize trainer with QMIX support
     trainer = MultiAgentTrainer(
         num_agents=num_agents,
         grid_size=ma_config.GRID_SIZE,
         coordination=coordination,
         parameter_sharing=parameter_sharing,
         shared_replay=shared_replay,
-        input_channels=6 if use_6ch else 5
+        input_channels=6 if use_6ch else 5,
+        use_qmix=use_qmix
     )
 
     # Load pre-trained single-agent checkpoint if provided
