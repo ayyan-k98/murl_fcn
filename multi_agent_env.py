@@ -616,11 +616,15 @@ class MultiAgentCoverageEnv:
         """
         Count cells this agent has visited that other agents have also visited.
 
+        FIXED: Only count each overlapping cell ONCE, not once per other agent.
+        Previously with 4 agents visiting same cell: counted as 3 overlaps (wrong!)
+        Now with 4 agents visiting same cell: counted as 1 overlap (correct!)
+
         Args:
             agent_id: ID of the agent to check
 
         Returns:
-            Number of overlapping cells
+            Number of overlapping cells (counted once each)
         """
         from multi_agent_config import ma_config
 
@@ -630,12 +634,17 @@ class MultiAgentCoverageEnv:
         agent = self.state.agents[agent_id]
         agent_visits = agent.robot_state.coverage_history >= config.COVERAGE_THRESHOLD
 
-        overlap_count = 0
+        # FIXED: Use logical OR to find any cell visited by this agent AND any other agent
+        # This counts each overlapping cell only ONCE instead of once per other agent
+        any_other_visits = np.zeros_like(agent_visits, dtype=bool)
         for other in self.state.agents:
             if other.agent_id != agent_id:
                 other_visits = other.robot_state.coverage_history >= config.COVERAGE_THRESHOLD
-                overlap = np.logical_and(agent_visits, other_visits)
-                overlap_count += np.sum(overlap)
+                any_other_visits = np.logical_or(any_other_visits, other_visits)
+
+        # Count cells visited by this agent that were also visited by at least one other agent
+        overlap = np.logical_and(agent_visits, any_other_visits)
+        overlap_count = np.sum(overlap)
 
         return int(overlap_count)
 

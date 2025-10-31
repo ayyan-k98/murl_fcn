@@ -54,7 +54,11 @@ class MultiAgentConfig:
     
     # Team reward components
     USE_OVERLAP_PENALTY = True
-    OVERLAP_PENALTY_SCALE = 2.0  # Penalty per overlapping cell
+    # FIXED: Reduced from 2.0 to 0.01 (200× reduction)
+    # Even with fixed counting, 2.0 per cell per step was too high
+    # 500 overlapping cells × 2.0 × 350 steps = -350,000 (catastrophic!)
+    # 500 overlapping cells × 0.01 × 350 steps = -1,750 (reasonable)
+    OVERLAP_PENALTY_SCALE = 0.01  # Penalty per overlapping cell per step
     
     USE_DIVERSITY_BONUS = True
     DIVERSITY_BONUS_SCALE = 0.5  # Reward for maintaining distance
