@@ -133,7 +133,7 @@ class MultiAgentConfig:
             'start_ep': 400,
             'end_ep': 600,
             'num_agents': 4,
-            'map_distribution': {'empty': 0.3, 'random': 0.3, 'corridor': 0.2, 'maze': 0.2},  # More corridors
+            'map_distribution': {'empty': 0.3, 'random': 0.3, 'corridor': 0.2, 'cave': 0.2},  # More corridors + caves
             'coordination': CoordinationStrategy.HIERARCHICAL,
             'expected_coverage': 0.82,
             'epsilon_floor': 0.05,
@@ -149,7 +149,7 @@ class MultiAgentConfig:
                 'empty': 0.2,
                 'random': 0.3,
                 'corridor': 0.3,  # Heavy corridor emphasis
-                'maze': 0.2
+                'cave': 0.2       # Use 'cave' instead of 'maze' (maze not implemented)
             },
             'coordination': CoordinationStrategy.HIERARCHICAL,
             'expected_coverage': 0.85,

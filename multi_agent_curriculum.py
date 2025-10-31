@@ -123,10 +123,10 @@ MULTI_AGENT_PHASES = [
     # ========================================================================
     # Goal: Advanced coordination with complex maps
     # - More corridors (20%) - CRITICAL for generalization!
-    # - Add maze maps
+    # - Add cave maps (complex irregular obstacles)
     # - Hierarchical coordination
     # - Further reduce overlap
-    # FIXED: More corridors (20% vs 0%), maze added, better targets
+    # FIXED: More corridors (20% vs 0%), cave maps added, better targets
     MultiAgentCurriculumPhase(
         episode_start=400,
         episode_end=600,
@@ -134,7 +134,7 @@ MULTI_AGENT_PHASES = [
             "empty": 0.3,
             "random": 0.3,
             "corridor": 0.2,    # FIXED: More corridors (was 0%)
-            "maze": 0.2
+            "cave": 0.2         # FIXED: Use 'cave' instead of 'maze' (maze not implemented)
         },
         coverage_target=0.82,   # FIXED: Higher target (was 0.58)
         overlap_target=0.20,    # FIXED: Target 20% overlap (was 0.15)
@@ -160,7 +160,7 @@ MULTI_AGENT_PHASES = [
             "empty": 0.2,
             "random": 0.3,
             "corridor": 0.3,    # FIXED: Heavy corridor emphasis! (was 15% in phase 5)
-            "maze": 0.2
+            "cave": 0.2         # FIXED: Use 'cave' instead of 'maze' (maze not implemented)
         },
         coverage_target=0.85,   # FIXED: High target (was 0.62)
         overlap_target=0.15,    # FIXED: Target <15% overlap (was 0.10)
@@ -217,7 +217,7 @@ def get_multi_agent_map_type(episode: int) -> str:
         episode: Current episode number
 
     Returns:
-        map_type: One of ['empty', 'random', 'corridor', 'maze']
+        map_type: One of ['empty', 'random', 'corridor', 'cave', 'room']
     """
     phase = get_multi_agent_curriculum_phase(episode)
     return phase.sample_map_type()
