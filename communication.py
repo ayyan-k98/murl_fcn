@@ -98,33 +98,162 @@ class NoCommunciation(CommunicationProtocol):
         return False
 
 
+class PositionCommunication:
+    """
+    Position-based communication protocol.
+
+    Agents broadcast (position, velocity, timestamp) every N steps.
+    Recipients within communication range receive the messages.
+
+    This enables persistent position information beyond visual sensor range,
+    allowing agents to coordinate proactively rather than just reactively.
+
+    Key features:
+    - Broadcasts every comm_freq steps
+    - Range-limited (comm_range parameter)
+    - Includes uncertainty/age of information
+    - Used to populate 6th channel (agent occupancy)
+    """
+
+    def __init__(
+        self,
+        num_agents: int,
+        comm_range: float = 15.0,
+        comm_freq: int = 5
+    ):
+        """
+        Initialize position communication protocol.
+
+        Args:
+            num_agents: Number of agents in the system
+            comm_range: Maximum communication range (grid cells)
+            comm_freq: Communication frequency (broadcast every N steps)
+        """
+        self.num_agents = num_agents
+        self.comm_range = comm_range
+        self.comm_freq = comm_freq
+        self.last_messages = {}  # agent_id -> (pos, vel, timestamp)
+        self.step_count = 0
+
+    def broadcast(
+        self,
+        agent_id: int,
+        position: Tuple[float, float],
+        velocity: Optional[Tuple[float, float]] = None
+    ) -> None:
+        """
+        Agent broadcasts its position and velocity.
+
+        Args:
+            agent_id: ID of broadcasting agent
+            position: (x, y) position in grid coordinates
+            velocity: (vx, vy) velocity (optional, defaults to (0, 0))
+        """
+        if velocity is None:
+            velocity = (0.0, 0.0)
+
+        self.last_messages[agent_id] = (position, velocity, self.step_count)
+
+    def receive(
+        self,
+        agent_id: int,
+        agent_position: Tuple[float, float]
+    ) -> List[Dict]:
+        """
+        Receive messages from other agents within communication range.
+
+        Args:
+            agent_id: ID of receiving agent
+            agent_position: (x, y) position of receiving agent
+
+        Returns:
+            List of messages from agents within range (compatible with agent_occupancy.py):
+            [{
+                'sender_id': int,  # ID of sending agent
+                'position': (x, y),  # Position of sender
+                'velocity': (vx, vy),  # Velocity of sender
+                'timestamp': int,  # When message was sent
+                'age': int,  # Steps since message was sent
+                'distance': float  # Distance to other agent
+            }, ...]
+        """
+        messages = []
+
+        for other_id, (pos, vel, timestamp) in self.last_messages.items():
+            if other_id == agent_id:
+                continue
+
+            # Calculate distance to other agent
+            distance = np.sqrt(
+                (pos[0] - agent_position[0])**2 +
+                (pos[1] - agent_position[1])**2
+            )
+
+            # Check if within communication range
+            if distance <= self.comm_range:
+                age = self.step_count - timestamp
+                messages.append({
+                    'sender_id': other_id,  # Compatible with agent_occupancy.py
+                    'position': pos,
+                    'velocity': vel,
+                    'timestamp': timestamp,  # Compatible with agent_occupancy.py
+                    'age': age,
+                    'distance': distance
+                })
+
+        return messages
+
+    def should_communicate(self, step: int) -> bool:
+        """Check if agents should broadcast this step."""
+        return (step % self.comm_freq) == 0
+
+    def step(self) -> None:
+        """Increment step counter."""
+        self.step_count += 1
+
+    def reset(self) -> None:
+        """Reset communication system (call at episode start)."""
+        self.last_messages = {}
+        self.step_count = 0
+
+
 def get_communication_protocol(
     protocol_name: str,
     num_agents: int,
     grid_size: int = 20,
-    comm_range: float = 5.0
-) -> CommunicationProtocol:
+    comm_range: float = 15.0,
+    comm_freq: int = 5
+):
     """
     Factory function to create communication protocol.
 
     Args:
-        protocol_name: Protocol name ['none'] (only option after cleanup)
+        protocol_name: Protocol name ['none', 'position']
         num_agents: Number of agents
         grid_size: Grid size (unused, kept for API compatibility)
-        comm_range: Communication range (unused, kept for API compatibility)
+        comm_range: Communication range (grid cells)
+        comm_freq: Communication frequency (every N steps)
 
     Returns:
-        CommunicationProtocol instance
+        Communication protocol instance (PositionCommunication or NoCommunciation)
 
     Note:
-        Position communication now handled via agent_occupancy.py (6th channel).
-        Use --use-6ch flag to enable position channel.
+        - 'none': No communication (baseline)
+        - 'position': Position/velocity broadcast (recommended for coordination)
     """
     if protocol_name == 'none':
         return NoCommunciation(num_agents=num_agents)
+    elif protocol_name == 'position':
+        return PositionCommunication(
+            num_agents=num_agents,
+            comm_range=comm_range,
+            comm_freq=comm_freq
+        )
     else:
-        raise ValueError(f"Unknown protocol: {protocol_name}. "
-                        f"Only 'none' supported. Use --use-6ch for position channel via agent_occupancy.py")
+        raise ValueError(
+            f"Unknown protocol: {protocol_name}. "
+            f"Supported: ['none', 'position']"
+        )
 
 
 if __name__ == "__main__":

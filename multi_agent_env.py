@@ -157,7 +157,7 @@ class MultiAgentCoverageEnv:
         
         # Track last actions for rotation penalty (per agent)
         self.last_actions: List[Optional[int]] = [None] * num_agents
-        
+
         # Action angle mapping (in degrees, 0° = North)
         self.action_angles = {
             0: 0,    # N
@@ -170,6 +170,30 @@ class MultiAgentCoverageEnv:
             7: 315,  # NW
             8: None  # STAY (no direction)
         }
+
+        # Communication system (optional)
+        # Will be initialized in set_communication_protocol()
+        self.comm_system = None
+        self.use_communication = False
+
+    def set_communication_protocol(self, comm_protocol):
+        """
+        Set communication protocol for the environment.
+
+        Args:
+            comm_protocol: Communication protocol instance (from communication.py)
+        """
+        from communication import PositionCommunication
+
+        self.comm_system = comm_protocol
+        self.use_communication = isinstance(comm_protocol, PositionCommunication)
+
+        if self.use_communication:
+            print(f"✓ Communication enabled: {comm_protocol.__class__.__name__}")
+            print(f"  Range: {comm_protocol.comm_range:.1f} cells")
+            print(f"  Frequency: Every {comm_protocol.comm_freq} steps")
+        else:
+            print("✓ Communication disabled (NoCommunciation)")
 
     def reset(self, map_type: Optional[str] = None) -> MultiAgentState:
         """
@@ -227,9 +251,13 @@ class MultiAgentCoverageEnv:
 
         # Initialize coordination strategy
         self._initialize_coordination()
-        
+
         # Reset last actions for rotation penalty
         self.last_actions = [None] * self.num_agents
+
+        # Reset communication system (if enabled)
+        if self.use_communication and self.comm_system is not None:
+            self.comm_system.reset()
 
         # Perform initial sensing for all agents
         for agent in self.state.agents:
@@ -265,6 +293,19 @@ class MultiAgentCoverageEnv:
 
         # Execute actions simultaneously (detect collisions)
         collision_info = self._execute_actions_parallel(actions)
+
+        # Communication step (if enabled)
+        if self.use_communication and self.comm_system is not None:
+            # Broadcast positions at configured frequency
+            if self.comm_system.should_communicate(self.state.step_count):
+                for agent in self.state.agents:
+                    self.comm_system.broadcast(
+                        agent.agent_id,
+                        agent.robot_state.position,
+                        velocity=(0.0, 0.0)  # Simplified: velocity not tracked
+                    )
+            # Increment comm system step counter
+            self.comm_system.step()
 
         # Update coordination strategy
         self._update_coordination()

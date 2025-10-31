@@ -28,11 +28,16 @@ class MultiAgentConfig:
     # Formula: 5.0 × (40/20)^0.4 = 5.0 × 1.74 = 8.7 ≈ 8.5
     SENSOR_RANGE = 8.5
 
+    # Communication settings
+    # CRITICAL: Enable communication for proper coordination!
+    USE_COMMUNICATION = True  # Enable position-based communication
+    COMM_PROTOCOL = 'position'  # Options: 'none', 'position'
+
     # Communication range between agents
     # FIXED: Increased to cover 3σ position uncertainty (99.7% confidence)
     # σ(t=5) = 0.5 + 1.0*5 = 5.5, 3σ = 16.5, using 15.0 for practical range
     COMMUNICATION_RANGE = 15.0
-    
+
     # Communication frequency (every N steps)
     # 1 = every step (high overhead but perfect info)
     # 5 = every 5 steps (balanced, recommended)
