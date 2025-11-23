@@ -148,6 +148,10 @@ class FCNSpatialNetwork(nn.Module):
             nn.Linear(hidden_dim, num_actions)
         )
 
+        # OPTIMIZATION: Cache coordinate grids to avoid recomputation
+        # Key: (H, W, device_str), Value: (y_coords, x_coords)
+        self._coord_cache = {}
+
         # Initialize weights conservatively
         self._initialize_weights()
 
@@ -170,6 +174,36 @@ class FCNSpatialNetwork(nn.Module):
             elif isinstance(m, (nn.BatchNorm2d, nn.LayerNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+
+    def _get_coord_grids(
+        self,
+        H: int,
+        W: int,
+        device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get cached coordinate grids (or compute once).
+
+        OPTIMIZATION: Coordinate grids are constant for a given (H, W, device),
+        so we cache them to avoid recomputation on every forward pass.
+
+        Args:
+            H: Grid height
+            W: Grid width
+            device: torch device
+
+        Returns:
+            y_coords: [1, H, 1] tensor with y coordinates
+            x_coords: [1, 1, W] tensor with x coordinates
+        """
+        cache_key = (H, W, str(device))
+
+        if cache_key not in self._coord_cache:
+            y_coords = torch.linspace(0, 1, H, device=device).view(1, H, 1)
+            x_coords = torch.linspace(0, 1, W, device=device).view(1, 1, W)
+            self._coord_cache[cache_key] = (y_coords, x_coords)
+
+        return self._coord_cache[cache_key]
 
     def _add_coord_channels(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -228,9 +262,9 @@ class FCNSpatialNetwork(nn.Module):
         global_features.extend([visited_ratio, frontier_ratio])
 
         # 3. Agent position (centroid of agent channel)
+        # OPTIMIZATION: Use cached coordinate grids
         H, W = agent_channel.shape[1], agent_channel.shape[2]
-        y_coords = torch.linspace(0, 1, H, device=x.device).view(1, H, 1)
-        x_coords = torch.linspace(0, 1, W, device=x.device).view(1, 1, W)
+        y_coords, x_coords = self._get_coord_grids(H, W, x.device)
 
         agent_mass = agent_channel.sum(dim=[1, 2]) + 1e-8
         agent_y = (agent_channel * y_coords).sum(dim=[1, 2]) / agent_mass
@@ -238,6 +272,7 @@ class FCNSpatialNetwork(nn.Module):
         global_features.extend([agent_y, agent_x])
 
         # 4. Mean distance to uncovered cells
+        # OPTIMIZATION: Expand cached coordinate grids
         y_grid = y_coords.expand(batch_size, H, W)
         x_grid = x_coords.expand(batch_size, H, W)
         dist_map = torch.sqrt(
